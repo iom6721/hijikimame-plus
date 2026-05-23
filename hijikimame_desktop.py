@@ -108,7 +108,7 @@ DEFAULT_EYE_COLOR = 'black'
 INVERTED_EYE_COLOR = 'white'
 
 # アプリバージョン（リリースタグと一致させてください）
-VERSION = "Snapshot-v2.2.3"
+VERSION = "Snapshot-v2.2.4"
 
 DISCORD_CLIENT_ID = "1507453857456721951"
 DISCORD_ACTIVITY_STATE = "※これは完全な身内ネタアプリケーションです。"
@@ -456,6 +456,8 @@ class HijikimameApp:
         self._update_available = False
         self._update_button = None
         self.discord_presence = None
+        self._discord_presence_retry_delay_ms = 30000
+        self._discord_presence_retry_scheduled = False
         self.master.after(500, self.start_update_check_thread)
         try:
             self.start_discord_presence()
@@ -814,15 +816,25 @@ class HijikimameApp:
             return
 
     def start_discord_presence(self):
+        if not self.settings.get('discord_presence_enabled', True):
+            return
         if Presence is None:
+            self._log_discord_debug('start_discord_presence', 'pypresence module unavailable')
             return
         try:
             self._disconnect_discord_presence()
             self.discord_presence = Presence(DISCORD_CLIENT_ID)
             self.discord_presence.connect()
             self._update_discord_presence()
+            self._discord_presence_retry_scheduled = False
         except Exception:
             self.discord_presence = None
+            if not self._discord_presence_retry_scheduled:
+                self._discord_presence_retry_scheduled = True
+                try:
+                    self.master.after(self._discord_presence_retry_delay_ms, self.start_discord_presence)
+                except Exception:
+                    pass
             self._log_discord_debug('start_discord_presence', traceback.format_exc())
 
     def _update_discord_presence(self):
