@@ -24,6 +24,10 @@ try:
     import requests
 except Exception:
     requests = None
+try:
+    from pypresence import Presence
+except Exception:
+    Presence = None
 import shutil
 import tempfile
 import stat
@@ -94,6 +98,8 @@ TAKOYAKI_IMAGE_PATH = "takoyaki.png"
 EYE_RADIUS = 3      
 EYE_OFFSET_X = 10   
 EYE_OFFSET_Y = -3   
+CENTER_OFFSET_X = 0
+CENTER_OFFSET_Y = 0
 EYE_MOVEMENT_LIMIT = 4 
 
 TRANSPARENT_COLOR = '#000001' 
@@ -101,7 +107,12 @@ DEFAULT_EYE_COLOR = 'black'
 INVERTED_EYE_COLOR = 'white'
 
 # アプリバージョン（リリースタグと一致させてください）
-VERSION = "v2.2.0"
+VERSION = "Snapshot v2.2.1"
+
+DISCORD_CLIENT_ID = "1507453857456721951"
+DISCORD_ACTIVITY_STATE = "※これは完全な身内ネタアプリケーションです。"
+DISCORD_REPO_URL = "https://github.com/ramune478/hijikimame-plus"
+CUSTOM_COSMETIC_WARNING = "コスメティックは exe と同じフォルダに保存されます。重要なファイルと同じ場所ですので、管理にはご注意ください。"
 
 
 def _self_replace_target(target_path, timeout=30):
@@ -292,6 +303,11 @@ class HijikimameApp:
             'edge_bounce_strength': EDGE_BOUNCE_STRENGTH,
             'mouse_repulsion_enabled': True,
             'screen_boundary_mode': 'bounce',
+            'discord_presence_enabled': True,
+            'custom_cosmetics': [],
+            'show_cosmetic_warning': True,
+            'character_scale': 1.0,
+            'eye_radius': EYE_RADIUS,
         }
 
         try:
@@ -324,6 +340,15 @@ class HijikimameApp:
         self.settings.setdefault('target_image_path', None)
         self.settings.setdefault('selected_mode', 0)
         self.settings.setdefault('screen_boundary_mode', 'bounce')
+        self.settings.setdefault('custom_cosmetics', [])
+        self.settings.setdefault('show_cosmetic_warning', True)
+        self.settings.setdefault('eye_offset_x', EYE_OFFSET_X)
+        self.settings.setdefault('eye_offset_y', EYE_OFFSET_Y)
+        self.settings.setdefault('center_offset_x', CENTER_OFFSET_X)
+        self.settings.setdefault('center_offset_y', CENTER_OFFSET_Y)
+        self.settings.setdefault('character_scale', 1.0)
+        self.settings.setdefault('eye_radius', EYE_RADIUS)
+        self._normalize_custom_cosmetics()
 
         if isinstance(self.settings.get('target_position'), list) and len(self.settings.get('target_position')) == 2:
             try:
@@ -353,8 +378,10 @@ class HijikimameApp:
             master.destroy()
             return
             
-        self.image_width, self.image_height = self.original_image.size
-        self.tk_image = ImageTk.PhotoImage(self.original_image)
+        # Apply character scale to the initially displayed image
+        display_img = self._get_display_image(self.original_image)
+        self.image_width, self.image_height = display_img.size
+        self.tk_image = ImageTk.PhotoImage(display_img)
 
         screen_width = master.winfo_vrootwidth()
         screen_height = master.winfo_vrootheight()
@@ -382,22 +409,24 @@ class HijikimameApp:
         self.character_id = self.canvas.create_image(self.image_width // 2, self.image_height // 2, 
                                                      image=self.tk_image)
 
-        base_center_x = self.image_width // 2
-        base_center_y = self.image_height // 2
-        
+        base_center_x = self.image_width // 2 + self.settings.get('center_offset_x', CENTER_OFFSET_X)
+        base_center_y = self.image_height // 2 + self.settings.get('center_offset_y', CENTER_OFFSET_Y)
+        eye_offset_x, eye_offset_y = self._get_eye_offset()
+        eye_r = int(self.settings.get('eye_radius', EYE_RADIUS))
+
         self.eye_left_id = self.canvas.create_oval(
-            base_center_x - EYE_OFFSET_X - EYE_RADIUS,
-            base_center_y + EYE_OFFSET_Y - EYE_RADIUS,
-            base_center_x - EYE_OFFSET_X + EYE_RADIUS,
-            base_center_y + EYE_OFFSET_Y + EYE_RADIUS,
-            fill=DEFAULT_EYE_COLOR, tag='eye' 
+            base_center_x - eye_offset_x - eye_r,
+            base_center_y + eye_offset_y - eye_r,
+            base_center_x - eye_offset_x + eye_r,
+            base_center_y + eye_offset_y + eye_r,
+            fill=DEFAULT_EYE_COLOR, tag='eye'
         )
         self.eye_right_id = self.canvas.create_oval(
-            base_center_x + EYE_OFFSET_X - EYE_RADIUS,
-            base_center_y + EYE_OFFSET_Y - EYE_RADIUS,
-            base_center_x + EYE_OFFSET_X + EYE_RADIUS,
-            base_center_y + EYE_OFFSET_Y + EYE_RADIUS,
-            fill=DEFAULT_EYE_COLOR, tag='eye' 
+            base_center_x + eye_offset_x - eye_r,
+            base_center_y + eye_offset_y - eye_r,
+            base_center_x + eye_offset_x + eye_r,
+            base_center_y + eye_offset_y + eye_r,
+            fill=DEFAULT_EYE_COLOR, tag='eye'
         )
         try:
             self.canvas.tag_raise(self.eye_left_id)
@@ -425,7 +454,12 @@ class HijikimameApp:
         self._latest_update_script_url = None
         self._update_available = False
         self._update_button = None
+        self.discord_presence = None
         self.master.after(500, self.start_update_check_thread)
+        try:
+            self.start_discord_presence()
+        except:
+            pass
         try:
             self.master.after(200, lambda: self.open_edit_window())
         except:
@@ -454,6 +488,115 @@ class HijikimameApp:
         except:
             pass
         return None
+
+    def get_app_folder(self):
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
+        try:
+            return os.path.dirname(os.path.abspath(__file__))
+        except:
+            return os.path.abspath('.')
+
+    def get_custom_cosmetic_path(self, filename):
+        return os.path.join(self.get_app_folder(), filename)
+
+    def _normalize_custom_cosmetics(self):
+        custom_list = []
+        for item in self.settings.get('custom_cosmetics', []):
+            if isinstance(item, str):
+                path = self.get_custom_cosmetic_path(item)
+                if os.path.isfile(path):
+                    custom_list.append(item)
+        self.settings['custom_cosmetics'] = custom_list
+
+    def _copy_cosmetic_file(self, source_path):
+        try:
+            app_dir = self.get_app_folder()
+            base_name = os.path.basename(source_path)
+            name, ext = os.path.splitext(base_name)
+            safe_name = base_name
+            counter = 1
+            while os.path.exists(os.path.join(app_dir, safe_name)):
+                safe_name = f"{name}-{counter}{ext}"
+                counter += 1
+            dest_path = os.path.join(app_dir, safe_name)
+            shutil.copyfile(source_path, dest_path)
+            return safe_name
+        except:
+            return None
+
+    def add_custom_cosmetic(self, warning_var=None):
+        try:
+            if warning_var is None or warning_var.get():
+                messagebox.showinfo("コスメティック追加の注意", CUSTOM_COSMETIC_WARNING)
+        except:
+            pass
+        try:
+            filename = filedialog.askopenfilename(
+                title="コスメティック画像を選択",
+                filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.bmp;*.gif"), ("All files", "*")]
+            )
+            if not filename:
+                return
+            image = self.load_image(filename)
+            if image is None:
+                messagebox.showerror("読み込み失敗", "選択したファイルを画像として読み込めませんでした。")
+                return
+            copied_name = self._copy_cosmetic_file(filename)
+            if not copied_name:
+                messagebox.showerror("保存失敗", "コスメティックを保存できませんでした。")
+                return
+            if copied_name not in self.settings.get('custom_cosmetics', []):
+                self.settings.setdefault('custom_cosmetics', []).append(copied_name)
+            self.save_settings_file()
+            self._normalize_custom_cosmetics()
+            try:
+                self._refresh_custom_cosmetic_listbox()
+            except:
+                pass
+        except:
+            pass
+
+    def _refresh_custom_cosmetic_listbox(self):
+        try:
+            if not hasattr(self, '_custom_cosmetic_listbox'):
+                return
+            self._custom_cosmetic_listbox.delete(0, 'end')
+            for item in self.settings.get('custom_cosmetics', []):
+                self._custom_cosmetic_listbox.insert('end', item)
+        except:
+            pass
+
+    def apply_custom_cosmetic_selection(self):
+        try:
+            if not hasattr(self, '_custom_cosmetic_listbox'):
+                return
+            sel = self._custom_cosmetic_listbox.curselection()
+            if not sel:
+                return
+            index = int(sel[0])
+            self.set_mode(5 + index)
+        except:
+            pass
+
+    def remove_custom_cosmetic(self):
+        try:
+            if not hasattr(self, '_custom_cosmetic_listbox'):
+                return
+            sel = self._custom_cosmetic_listbox.curselection()
+            if not sel:
+                return
+            index = int(sel[0])
+            target_name = self.settings.get('custom_cosmetics', [])[index]
+            if target_name in self.settings.get('custom_cosmetics', []):
+                self.settings['custom_cosmetics'].pop(index)
+            self.save_settings_file()
+            self._normalize_custom_cosmetics()
+            if self.current_mode >= 5 and self.current_mode - 5 >= len(self.settings.get('custom_cosmetics', [])):
+                self.set_mode(0)
+            self._refresh_custom_cosmetic_listbox()
+        except:
+            pass
 
     def _download_latest_script(self):
         if requests is None or not self._latest_update_script_url:
@@ -669,6 +812,39 @@ class HijikimameApp:
         except Exception:
             return
 
+    def start_discord_presence(self):
+        if Presence is None:
+            return
+        try:
+            self._disconnect_discord_presence()
+            self.discord_presence = Presence(DISCORD_CLIENT_ID)
+            self.discord_presence.connect()
+            self._update_discord_presence()
+        except Exception:
+            self.discord_presence = None
+
+    def _update_discord_presence(self):
+        if not getattr(self, 'discord_presence', None):
+            return
+        try:
+            self.discord_presence.update(
+                state=DISCORD_ACTIVITY_STATE,
+                buttons=[
+                    {"label": "GitHub", "url": DISCORD_REPO_URL}
+                ]
+            )
+        except Exception:
+            pass
+
+    def _disconnect_discord_presence(self):
+        if not getattr(self, 'discord_presence', None):
+            return
+        try:
+            self.discord_presence.close()
+        except Exception:
+            pass
+        self.discord_presence = None
+
     def _apply_mode(self, mode):
         if self.is_exiting:
             return
@@ -736,7 +912,12 @@ class HijikimameApp:
                     pass
 
         if should_update_image:
-            self.tk_image = ImageTk.PhotoImage(new_image)
+            display_img = self._get_display_image(new_image)
+            try:
+                self._apply_image_size(display_img)
+            except:
+                pass
+            self.tk_image = ImageTk.PhotoImage(display_img)
             self.canvas.itemconfig(self.character_id, image=self.tk_image)
         try:
             self.canvas.itemconfig(self.eye_left_id, fill=new_eye_color)
@@ -823,6 +1004,63 @@ class HijikimameApp:
             return None
         return im
 
+    def _get_display_image(self, image):
+        try:
+            scale = float(self.settings.get('character_scale', 1.0))
+        except:
+            scale = 1.0
+        if image is None or scale == 1.0:
+            return image
+        try:
+            w = max(1, int(image.width * scale))
+            h = max(1, int(image.height * scale))
+            return image.resize((w, h), Image.LANCZOS)
+        except:
+            return image
+
+    def _get_center_offset(self):
+        return (int(self.settings.get('center_offset_x', CENTER_OFFSET_X)),
+                int(self.settings.get('center_offset_y', CENTER_OFFSET_Y)))
+
+    def _get_eye_offset(self):
+        return (int(self.settings.get('eye_offset_x', EYE_OFFSET_X)),
+                int(self.settings.get('eye_offset_y', EYE_OFFSET_Y)))
+
+    def _update_eye_positions(self):
+        base_center_x = self.image_width // 2 + self._get_center_offset()[0]
+        base_center_y = self.image_height // 2 + self._get_center_offset()[1]
+        eye_offset_x, eye_offset_y = self._get_eye_offset()
+        lx = base_center_x - eye_offset_x
+        ly = base_center_y + eye_offset_y
+        rx = base_center_x + eye_offset_x
+        ry = base_center_y + eye_offset_y
+        r = int(self.settings.get('eye_radius', EYE_RADIUS))
+        try:
+            self.canvas.coords(self.eye_left_id, lx-r, ly-r, lx+r, ly+r)
+            self.canvas.coords(self.eye_right_id, rx-r, ry-r, rx+r, ry+r)
+        except:
+            pass
+
+    def _apply_image_size(self, image):
+        try:
+            # Accept either a PIL Image (has .size) or a PhotoImage (has width/height methods)
+            if hasattr(image, 'size'):
+                self.image_width, self.image_height = image.size
+            else:
+                try:
+                    self.image_width, self.image_height = image.width(), image.height()
+                except:
+                    return
+            self.canvas.config(width=self.image_width, height=self.image_height)
+            self.master.geometry(f'{self.image_width}x{self.image_height}+{int(self.x)}+{int(self.y)}')
+            try:
+                self.canvas.coords(self.character_id, self.image_width // 2, self.image_height // 2)
+            except:
+                pass
+            self._update_eye_positions()
+        except:
+            pass
+
     def set_mode(self, mode, save=True):
         if self.is_exiting:
             return
@@ -845,6 +1083,25 @@ class HijikimameApp:
         new_image = self.original_image
         new_eye_color = DEFAULT_EYE_COLOR
         self.is_inverted = False
+
+        custom_cosmetics = self.settings.get('custom_cosmetics', [])
+        if self.current_mode >= 5:
+            custom_index = self.current_mode - 5
+            if custom_index < 0 or custom_index >= len(custom_cosmetics):
+                self.current_mode = 0
+                self.settings['selected_mode'] = 0
+                if not save:
+                    self.save_settings_file()
+            else:
+                custom_path = self.get_custom_cosmetic_path(custom_cosmetics[custom_index])
+                custom_image = self.load_image(custom_path)
+                if custom_image is not None:
+                    new_image = custom_image
+                else:
+                    self.current_mode = 0
+                    self.settings['selected_mode'] = 0
+                    if not save:
+                        self.save_settings_file()
 
         if self.current_mode == 0:
             pass
@@ -890,6 +1147,7 @@ class HijikimameApp:
                     self.nijiki_frame_index = 0
                     self.nijiki_last_frame_time = time.time()
                     self.tk_image = first_photo
+                    self._apply_image_size(first_photo)
                     self.canvas.itemconfig(self.character_id, image=self.tk_image)
                     should_update_image = False
                 except StopIteration:
@@ -906,7 +1164,12 @@ class HijikimameApp:
                 new_image = self.extra_image
 
         if should_update_image:
-            self.tk_image = ImageTk.PhotoImage(new_image)
+            display_img = self._get_display_image(new_image)
+            try:
+                self._apply_image_size(display_img)
+            except:
+                pass
+            self.tk_image = ImageTk.PhotoImage(display_img)
             self.canvas.itemconfig(self.character_id, image=self.tk_image)
         try:
             self.canvas.itemconfig(self.eye_left_id, fill=new_eye_color)
@@ -920,7 +1183,10 @@ class HijikimameApp:
     def toggle_mode(self):
         if self.is_exiting:
             return
-        self.set_mode((self.current_mode + 1) % 5)
+        total_modes = 5 + len(self.settings.get('custom_cosmetics', []))
+        if total_modes <= 0:
+            total_modes = 5
+        self.set_mode((self.current_mode + 1) % total_modes)
 
     def load_gif_frames(self, path):
         frames = []
@@ -984,7 +1250,9 @@ class HijikimameApp:
                             im.thumbnail((target_w, target_h), Image.LANCZOS)
                 except:
                     pass
-                photo = ImageTk.PhotoImage(im)
+                # scale frame according to character scale before creating PhotoImage
+                im_disp = self._get_display_image(im)
+                photo = ImageTk.PhotoImage(im_disp)
                 self.nijiki_cache[i] = photo
             except:
                 pass
@@ -1285,6 +1553,8 @@ class HijikimameApp:
             tk.Button(top_btn_frame, text="場所選択", command=self.request_target_position_selection).pack(side='left', padx=5)
             tk.Button(top_btn_frame, text="画像追跡設定", command=self.choose_target_image).pack(side='left', padx=5)
             tk.Button(top_btn_frame, text="追尾解除", command=self.clear_target_tracking).pack(side='left', padx=5)
+            tk.Button(top_btn_frame, text="設定読込", command=self.import_settings_from_file).pack(side='right', padx=5)
+            tk.Button(top_btn_frame, text="設定出力", command=self.export_settings_to_file).pack(side='right', padx=5)
         except:
             pass
 
@@ -1293,17 +1563,56 @@ class HijikimameApp:
         self._target_status_label = tk.Label(self._edit_win, text=self._get_target_status_text())
         self._target_status_label.pack(anchor='w', padx=8, pady=2)
 
+        content_container = tk.Frame(self._edit_win)
+        content_container.pack(fill='both', expand=True)
+        content_canvas = tk.Canvas(content_container, borderwidth=0, highlightthickness=0)
+        content_scroll = tk.Scrollbar(content_container, orient='vertical', command=content_canvas.yview)
+        self._edit_frame = tk.Frame(content_canvas)
+        self._edit_frame.bind('<Configure>', lambda e: content_canvas.configure(scrollregion=content_canvas.bbox('all')))
+        content_canvas.create_window((0, 0), window=self._edit_frame, anchor='nw')
+        content_canvas.configure(yscrollcommand=content_scroll.set)
+        content_canvas.pack(side='left', fill='both', expand=True)
+        content_scroll.pack(side='right', fill='y')
+        self._edit_win.geometry('400x520')
+        self._edit_win.minsize(450, 650)
+
         # キャラクター選択
-        char_frame = tk.LabelFrame(self._edit_win, text='キャラクター選択')
+        char_frame = tk.LabelFrame(self._edit_frame, text='キャラクター選択')
         char_frame.pack(fill='both', padx=8, pady=5, expand=True)
         char_canvas = tk.Canvas(char_frame, borderwidth=0, highlightthickness=0, height=200)
-        char_scroll = tk.Scrollbar(char_frame, orient='vertical', command=char_canvas.yview)
         char_container = tk.Frame(char_canvas)
         char_container.bind('<Configure>', lambda e: char_canvas.configure(scrollregion=char_canvas.bbox('all')))
         char_canvas.create_window((0, 0), window=char_container, anchor='nw')
-        char_canvas.configure(yscrollcommand=char_scroll.set)
         char_canvas.pack(side='left', fill='both', expand=True)
-        char_scroll.pack(side='right', fill='y')
+
+        def _on_edit_mousewheel(event):
+            try:
+                if event.widget.winfo_toplevel() is not self._edit_win:
+                    return
+            except:
+                pass
+            if hasattr(event, 'delta') and event.delta:
+                content_canvas.yview_scroll(int(-event.delta / 120), 'units')
+            elif getattr(event, 'num', None) == 4:
+                content_canvas.yview_scroll(-1, 'units')
+            elif getattr(event, 'num', None) == 5:
+                content_canvas.yview_scroll(1, 'units')
+            return 'break'
+
+        # Bind globally but only handle events originating from this edit window
+        self._edit_win.bind_all('<MouseWheel>', _on_edit_mousewheel)
+        self._edit_win.bind_all('<Button-4>', _on_edit_mousewheel)
+        self._edit_win.bind_all('<Button-5>', _on_edit_mousewheel)
+
+        def _cleanup_edit_mousewheel_bindings(event):
+            try:
+                self._edit_win.unbind_all('<MouseWheel>')
+                self._edit_win.unbind_all('<Button-4>')
+                self._edit_win.unbind_all('<Button-5>')
+            except:
+                pass
+
+        self._edit_win.bind('<Destroy>', _cleanup_edit_mousewheel_bindings)
 
         self._character_buttons = {}
         mode_names = {
@@ -1322,53 +1631,133 @@ class HijikimameApp:
         self._refresh_character_buttons()
 
         repulsion_var = tk.IntVar(value=1 if self.settings.get('mouse_repulsion_enabled', True) else 0)
-        repulsion_cb = tk.Checkbutton(self._edit_win, text="ひじき豆の反発", variable=repulsion_var)
+        repulsion_cb = tk.Checkbutton(self._edit_frame, text="ひじき豆の反発", variable=repulsion_var)
         repulsion_cb.pack(anchor='w', padx=8, pady=2)
 
+        tk.Label(self._edit_frame, text="画面端の挙動:").pack(anchor='w', padx=8)
+        boundary_mode_var = tk.StringVar(value=self.settings.get('screen_boundary_mode', 'bounce'))
+        boundary_menu = tk.OptionMenu(self._edit_frame, boundary_mode_var, 'bounce', 'stop', 'destroy')
+        boundary_menu.config(width=20)
+        boundary_menu.pack(fill='x', padx=8, pady=2)
 
+        discord_presence_var = tk.IntVar(value=1 if self.settings.get('discord_presence_enabled', True) else 0)
+        discord_presence_cb = tk.Checkbutton(self._edit_frame, text="Discord に状態を表示する", variable=discord_presence_var)
+        discord_presence_cb.pack(anchor='w', padx=8, pady=2)
 
-        tk.Label(self._edit_win, text="追尾速度:").pack(anchor='w', padx=8)
-        tracking_scale = tk.Scale(self._edit_win, from_=0.0, to=0.1, resolution=0.001, orient='horizontal')
-        tracking_scale.set(self.settings.get('tracking_speed', TRACKING_SPEED))
-        tracking_scale.pack(fill='x', padx=8)
+        show_warning_var = tk.IntVar(value=1 if self.settings.get('show_cosmetic_warning', True) else 0)
+        show_warning_cb = tk.Checkbutton(self._edit_frame, text="コスメ追加時の警告を表示する", variable=show_warning_var)
+        show_warning_cb.pack(anchor='w', padx=8, pady=2)
 
-        tk.Label(self._edit_win, text="投げ速度倍率:").pack(anchor='w', padx=8)
-        throw_scale = tk.Scale(self._edit_win, from_=0.1, to=10, resolution=0.1, orient='horizontal')
-        throw_scale.set(self.settings.get('throw_speed_multiplier', 3.0))
-        throw_scale.pack(fill='x', padx=8)
+        custom_frame = tk.LabelFrame(self._edit_frame, text='カスタムコスメティック')
+        custom_frame.pack(fill='both', padx=8, pady=5, expand=True)
+        self._custom_cosmetic_listbox = tk.Listbox(custom_frame, height=5)
+        self._custom_cosmetic_listbox.pack(fill='both', padx=4, pady=4, expand=True)
+        custom_button_frame = tk.Frame(custom_frame)
+        custom_button_frame.pack(fill='x', padx=4, pady=2)
+        tk.Button(custom_button_frame, text='追加', command=lambda: self.add_custom_cosmetic(show_warning_var)).pack(side='left', padx=2)
+        tk.Button(custom_button_frame, text='適用', command=self.apply_custom_cosmetic_selection).pack(side='left', padx=2)
+        tk.Button(custom_button_frame, text='削除', command=self.remove_custom_cosmetic).pack(side='left', padx=2)
+        self._refresh_custom_cosmetic_listbox()
 
-        tk.Label(self._edit_win, text="投げ 最大倍率:").pack(anchor='w', padx=8)
-        max_throw_scale = tk.Scale(self._edit_win, from_=1, to=50, orient='horizontal')
-        max_throw_scale.set(self.settings.get('max_throw_multiplier', 15))
-        max_throw_scale.pack(fill='x', padx=8)
+        adjust_frame = tk.LabelFrame(self._edit_frame, text='コスメティック調整')
+        adjust_frame.pack(fill='both', padx=8, pady=5, expand=True)
+        tk.Label(adjust_frame, text='目のオフセット X:').pack(anchor='w', padx=4, pady=2)
+        self.eye_x_scale = tk.Scale(adjust_frame, from_=-80, to=80, orient='horizontal')
+        self.eye_x_scale.set(self.settings.get('eye_offset_x', EYE_OFFSET_X))
+        self.eye_x_scale.pack(fill='x', padx=4)
+        tk.Label(adjust_frame, text='目のオフセット Y:').pack(anchor='w', padx=4, pady=2)
+        self.eye_y_scale = tk.Scale(adjust_frame, from_=-80, to=80, orient='horizontal')
+        # Y軸はUI操作の向きを反転して扱う（スケール値 = -設定値）
+        self.eye_y_scale.set(-self.settings.get('eye_offset_y', EYE_OFFSET_Y))
+        self.eye_y_scale.pack(fill='x', padx=4)
+        tk.Label(adjust_frame, text='キャラ中心オフセット X:').pack(anchor='w', padx=4, pady=2)
+        self.center_x_scale = tk.Scale(adjust_frame, from_=-120, to=120, orient='horizontal')
+        self.center_x_scale.set(self.settings.get('center_offset_x', CENTER_OFFSET_X))
+        self.center_x_scale.pack(fill='x', padx=4)
+        tk.Label(adjust_frame, text='キャラ中心オフセット Y:').pack(anchor='w', padx=4, pady=2)
+        self.center_y_scale = tk.Scale(adjust_frame, from_=-120, to=120, orient='horizontal')
+        # Y軸はUI操作の向きを反転して扱う（スケール値 = -設定値）
+        self.center_y_scale.set(-self.settings.get('center_offset_y', CENTER_OFFSET_Y))
+        self.center_y_scale.pack(fill='x', padx=4)
 
-        tk.Label(self._edit_win, text="画面端バウンド回数:").pack(anchor='w', padx=8)
-        bounce_scale = tk.Scale(self._edit_win, from_=0, to=20, orient='horizontal')
-        bounce_scale.set(self.settings.get('edge_bounce_count', EDGE_BOUNCE_COUNT_DEFAULT))
-        bounce_scale.pack(fill='x', padx=8)
+        # キャラの大きさ（スケーリング）
+        tk.Label(adjust_frame, text='キャラの大きさ:').pack(anchor='w', padx=4, pady=2)
+        self.char_scale = tk.Scale(adjust_frame, from_=0.1, to=3.0, resolution=0.01, orient='horizontal')
+        self.char_scale.set(self.settings.get('character_scale', 1.0))
+        self.char_scale.pack(fill='x', padx=4)
 
-        tk.Label(self._edit_win, text="バウンド強さ:").pack(anchor='w', padx=8)
-        bounce_strength_scale = tk.Scale(self._edit_win, from_=0.0, to=1.5, resolution=0.05, orient='horizontal')
-        bounce_strength_scale.set(self.settings.get('edge_bounce_strength', EDGE_BOUNCE_STRENGTH))
-        bounce_strength_scale.pack(fill='x', padx=8)
+        # 目の大きさ
+        tk.Label(adjust_frame, text='目の大きさ:').pack(anchor='w', padx=4, pady=2)
+        self.eye_size_scale = tk.Scale(adjust_frame, from_=0, to=64, orient='horizontal')
+        self.eye_size_scale.set(self.settings.get('eye_radius', EYE_RADIUS))
+        self.eye_size_scale.pack(fill='x', padx=4)
 
-        tk.Label(self._edit_win, text="虹き豆 再生速度 (FPS):").pack(anchor='w', padx=8)
-        nijiki_scale = tk.Scale(self._edit_win, from_=1, to=60, orient='horizontal')
-        nijiki_scale.set(self.settings.get('nijiki_fps', NIJIKI_DEFAULT_FPS))
-        nijiki_scale.pack(fill='x', padx=8)
+        tk.Label(self._edit_frame, text="追尾速度:").pack(anchor='w', padx=8)
+        self.tracking_scale = tk.Scale(self._edit_frame, from_=0.0, to=0.1, resolution=0.001, orient='horizontal')
+        self.tracking_scale.set(self.settings.get('tracking_speed', TRACKING_SPEED))
+        self.tracking_scale.pack(fill='x', padx=8)
+
+        tk.Label(self._edit_frame, text="投げ速度倍率:").pack(anchor='w', padx=8)
+        self.throw_scale = tk.Scale(self._edit_frame, from_=0.1, to=10, resolution=0.1, orient='horizontal')
+        self.throw_scale.set(self.settings.get('throw_speed_multiplier', 3.0))
+        self.throw_scale.pack(fill='x', padx=8)
+
+        tk.Label(self._edit_frame, text="投げ 最大倍率:").pack(anchor='w', padx=8)
+        self.max_throw_scale = tk.Scale(self._edit_frame, from_=1, to=50, orient='horizontal')
+        self.max_throw_scale.set(self.settings.get('max_throw_multiplier', 15))
+        self.max_throw_scale.pack(fill='x', padx=8)
+
+        tk.Label(self._edit_frame, text="画面端バウンド回数:").pack(anchor='w', padx=8)
+        self.bounce_scale = tk.Scale(self._edit_frame, from_=0, to=20, orient='horizontal')
+        self.bounce_scale.set(self.settings.get('edge_bounce_count', EDGE_BOUNCE_COUNT_DEFAULT))
+        self.bounce_scale.pack(fill='x', padx=8)
+
+        tk.Label(self._edit_frame, text="バウンド強さ:").pack(anchor='w', padx=8)
+        self.bounce_strength_scale = tk.Scale(self._edit_frame, from_=0.0, to=1.5, resolution=0.05, orient='horizontal')
+        self.bounce_strength_scale.set(self.settings.get('edge_bounce_strength', EDGE_BOUNCE_STRENGTH))
+        self.bounce_strength_scale.pack(fill='x', padx=8)
+
+        tk.Label(self._edit_frame, text="虹き豆 再生速度 (FPS):").pack(anchor='w', padx=8)
+        self.nijiki_scale = tk.Scale(self._edit_frame, from_=1, to=60, orient='horizontal')
+        self.nijiki_scale.set(self.settings.get('nijiki_fps', NIJIKI_DEFAULT_FPS))
+        self.nijiki_scale.pack(fill='x', padx=8)
 
         def apply_settings():
-            self.settings['nijiki_fps'] = int(nijiki_scale.get())
+            self.settings['nijiki_fps'] = int(self.nijiki_scale.get())
             self.settings['mouse_repulsion_enabled'] = bool(repulsion_var.get())
-            self.settings['tracking_speed'] = float(tracking_scale.get())
-            self.settings['throw_speed_multiplier'] = float(throw_scale.get())
-            self.settings['max_throw_multiplier'] = float(max_throw_scale.get())
-            self.settings['edge_bounce_count'] = int(bounce_scale.get())
-            self.settings['edge_bounce_strength'] = float(bounce_strength_scale.get())
+            self.settings['tracking_speed'] = float(self.tracking_scale.get())
+            self.settings['throw_speed_multiplier'] = float(self.throw_scale.get())
+            self.settings['max_throw_multiplier'] = float(self.max_throw_scale.get())
+            self.settings['edge_bounce_count'] = int(self.bounce_scale.get())
+            self.settings['edge_bounce_strength'] = float(self.bounce_strength_scale.get())
+            self.settings['screen_boundary_mode'] = boundary_mode_var.get()
+            self.settings['discord_presence_enabled'] = bool(discord_presence_var.get())
+            self.settings['show_cosmetic_warning'] = bool(show_warning_var.get())
+            self.settings['eye_offset_x'] = int(self.eye_x_scale.get())
+            # Y軸はUI上で向きを反転して扱う
+            self.settings['eye_offset_y'] = -int(self.eye_y_scale.get())
+            self.settings['center_offset_x'] = int(self.center_x_scale.get())
+            # Y軸はUI上で向きを反転して扱う
+            self.settings['center_offset_y'] = -int(self.center_y_scale.get())
+            # キャラと目のサイズ
+            try:
+                self.settings['character_scale'] = float(self.char_scale.get())
+            except:
+                self.settings['character_scale'] = 1.0
+            self.settings['eye_radius'] = int(self.eye_size_scale.get())
             if not self.is_dragging_stop and self.throw_cooldown == 0:
                 self.remaining_bounces = self.settings.get('edge_bounce_count', EDGE_BOUNCE_COUNT_DEFAULT)
             try:
                 self.save_settings_file()
+            except:
+                pass
+            try:
+                # Re-apply current mode to update displayed image scale/size
+                self.set_mode(self.current_mode, save=False)
+            except:
+                pass
+            try:
+                self._update_eye_positions()
             except:
                 pass
             try:
@@ -1390,23 +1779,40 @@ class HijikimameApp:
             self.settings['edge_bounce_strength'] = EDGE_BOUNCE_STRENGTH
             self.settings['mouse_repulsion_enabled'] = True
             self.settings['screen_boundary_mode'] = 'bounce'
+            self.settings['discord_presence_enabled'] = True
+            self.settings['show_cosmetic_warning'] = True
             self.settings['selected_mode'] = 0
             self.settings['tracking_target_mode'] = 0
             self.settings['target_position'] = None
             self.settings['target_image_path'] = None
+            self.settings['eye_offset_x'] = EYE_OFFSET_X
+            self.settings['eye_offset_y'] = EYE_OFFSET_Y
+            self.settings['center_offset_x'] = CENTER_OFFSET_X
+            self.settings['center_offset_y'] = CENTER_OFFSET_Y
+            self.settings['character_scale'] = 1.0
+            self.settings['eye_radius'] = EYE_RADIUS
             self.target_position = None
             self.target_image_path = None
             self.target_image_template = None
             self.target_image_last_search = 0.0
             self._target_image_search_in_progress = False
             self.current_mode = 0
-            nijiki_scale.set(NIJIKI_DEFAULT_FPS)
-            tracking_scale.set(TRACKING_SPEED)
-            throw_scale.set(2.5)
-            max_throw_scale.set(10)
-            bounce_scale.set(EDGE_BOUNCE_COUNT_DEFAULT)
-            bounce_strength_scale.set(EDGE_BOUNCE_STRENGTH)
+            self.nijiki_scale.set(NIJIKI_DEFAULT_FPS)
+            self.tracking_scale.set(TRACKING_SPEED)
+            self.throw_scale.set(2.5)
+            self.max_throw_scale.set(10)
+            self.bounce_scale.set(EDGE_BOUNCE_COUNT_DEFAULT)
+            self.bounce_strength_scale.set(EDGE_BOUNCE_STRENGTH)
             repulsion_var.set(1)
+            show_warning_var.set(1)
+            boundary_mode_var.set('bounce')
+            # スライダー側の表示値は Y を反転しているので注意
+            self.eye_x_scale.set(EYE_OFFSET_X)
+            self.eye_y_scale.set(-EYE_OFFSET_Y)
+            self.center_x_scale.set(CENTER_OFFSET_X)
+            self.center_y_scale.set(-CENTER_OFFSET_Y)
+            self.char_scale.set(1.0)
+            self.eye_size_scale.set(EYE_RADIUS)
             try:
                 self._refresh_character_buttons()
             except:
@@ -1480,6 +1886,106 @@ class HijikimameApp:
             return None
         return None
 
+    def export_settings_to_file(self):
+        try:
+            p = filedialog.asksaveasfilename(parent=self.master, defaultextension='.json', filetypes=[('JSON','*.json')], title='設定を保存')
+            if not p:
+                return
+            settings_to_save = dict(self.settings)
+            if 'edit_enabled' in settings_to_save:
+                settings_to_save.pop('edit_enabled', None)
+            with open(p, 'w', encoding='utf-8') as f:
+                json.dump(settings_to_save, f, ensure_ascii=False, indent=2)
+            try:
+                messagebox.showinfo('保存完了', f'設定を保存しました: {p}')
+            except:
+                pass
+        except Exception:
+            try:
+                messagebox.showerror('保存失敗', '設定の保存に失敗しました。')
+            except:
+                pass
+
+    def import_settings_from_file(self):
+        try:
+            p = filedialog.askopenfilename(parent=self.master, title='設定ファイルを選択', filetypes=[('JSON','*.json'), ('すべて', '*.*')])
+            if not p:
+                return
+            with open(p, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise Exception('invalid')
+            for k, v in data.items():
+                self.settings[k] = v
+            # Ensure our keys and types
+            self.settings.setdefault('character_scale', 1.0)
+            self.settings.setdefault('eye_radius', EYE_RADIUS)
+            try:
+                self.settings['eye_offset_x'] = int(self.settings.get('eye_offset_x', EYE_OFFSET_X))
+            except:
+                self.settings['eye_offset_x'] = EYE_OFFSET_X
+            try:
+                self.settings['eye_offset_y'] = int(self.settings.get('eye_offset_y', EYE_OFFSET_Y))
+            except:
+                self.settings['eye_offset_y'] = EYE_OFFSET_Y
+            try:
+                self.settings['center_offset_x'] = int(self.settings.get('center_offset_x', CENTER_OFFSET_X))
+            except:
+                self.settings['center_offset_x'] = CENTER_OFFSET_X
+            try:
+                self.settings['center_offset_y'] = int(self.settings.get('center_offset_y', CENTER_OFFSET_Y))
+            except:
+                self.settings['center_offset_y'] = CENTER_OFFSET_Y
+            try:
+                self.settings['character_scale'] = float(self.settings.get('character_scale', 1.0))
+            except:
+                self.settings['character_scale'] = 1.0
+            try:
+                self.settings['eye_radius'] = int(self.settings.get('eye_radius', EYE_RADIUS))
+            except:
+                self.settings['eye_radius'] = EYE_RADIUS
+            # persist
+            try:
+                self.save_settings_file()
+            except:
+                pass
+            # update UI if open
+            try:
+                if hasattr(self, '_edit_win') and self._edit_win.winfo_exists():
+                    try:
+                        self.eye_x_scale.set(self.settings.get('eye_offset_x', EYE_OFFSET_X))
+                        self.eye_y_scale.set(-self.settings.get('eye_offset_y', EYE_OFFSET_Y))
+                        self.center_x_scale.set(self.settings.get('center_offset_x', CENTER_OFFSET_X))
+                        self.center_y_scale.set(-self.settings.get('center_offset_y', CENTER_OFFSET_Y))
+                        self.char_scale.set(self.settings.get('character_scale', 1.0))
+                        self.eye_size_scale.set(self.settings.get('eye_radius', EYE_RADIUS))
+                        self.tracking_scale.set(self.settings.get('tracking_speed', TRACKING_SPEED))
+                        self.throw_scale.set(self.settings.get('throw_speed_multiplier', 2.5))
+                        self.max_throw_scale.set(self.settings.get('max_throw_multiplier', 10))
+                        self.bounce_scale.set(self.settings.get('edge_bounce_count', EDGE_BOUNCE_COUNT_DEFAULT))
+                        self.bounce_strength_scale.set(self.settings.get('edge_bounce_strength', EDGE_BOUNCE_STRENGTH))
+                        self.nijiki_scale.set(self.settings.get('nijiki_fps', NIJIKI_DEFAULT_FPS))
+                        self._refresh_custom_cosmetic_listbox()
+                    except:
+                        pass
+            except:
+                pass
+            try:
+                self.set_mode(self.current_mode, save=False)
+                self._update_eye_positions()
+                self.broadcast_settings()
+            except:
+                pass
+            try:
+                messagebox.showinfo('読み込み完了', '設定を読み込みました。')
+            except:
+                pass
+        except Exception:
+            try:
+                messagebox.showerror('読み込み失敗', '設定ファイルの読み込みに失敗しました。')
+            except:
+                pass
+
     def start_drag_stop(self, event):
         if event.num == 1:
             self.is_dragging_stop = True; self.vx = 0; self.vy = 0; self.throw_cooldown = 0 
@@ -1517,19 +2023,24 @@ class HijikimameApp:
     def update_eyes_only(self):
         mouse_x = self.master.winfo_pointerx()
         mouse_y = self.master.winfo_pointery()
-        char_center_x = self.x + self.image_width // 2
-        char_center_y = self.y + self.image_height // 2
+        char_center_x = self.x + self.image_width // 2 + self._get_center_offset()[0]
+        char_center_y = self.y + self.image_height // 2 + self._get_center_offset()[1]
         dx = mouse_x - char_center_x; dy = mouse_y - char_center_y
         dist = math.hypot(dx, dy)
-        if dist != 0: dx_u, dy_u = dx / dist, dy / dist
-        else: dx_u, dy_u = 0, 0
+        if dist != 0:
+            dx_u, dy_u = dx / dist, dy / dist
+        else:
+            dx_u, dy_u = 0, 0
         move_dist = min(dist * 0.1, EYE_MOVEMENT_LIMIT)
         move_x, move_y = dx_u * move_dist, dy_u * move_dist
-        bx, by = self.image_width // 2, self.image_height // 2
-        lx, ly = bx - EYE_OFFSET_X + move_x, by + EYE_OFFSET_Y + move_y
-        rx, ry = bx + EYE_OFFSET_X + move_x, by + EYE_OFFSET_Y + move_y
-        self.canvas.coords(self.eye_left_id, lx-EYE_RADIUS, ly-EYE_RADIUS, lx+EYE_RADIUS, ly+EYE_RADIUS)
-        self.canvas.coords(self.eye_right_id, rx-EYE_RADIUS, ry-EYE_RADIUS, rx+EYE_RADIUS, ry+EYE_RADIUS)
+        base_center_x = self.image_width // 2 + self._get_center_offset()[0]
+        base_center_y = self.image_height // 2 + self._get_center_offset()[1]
+        eye_offset_x, eye_offset_y = self._get_eye_offset()
+        lx, ly = base_center_x - eye_offset_x + move_x, base_center_y + eye_offset_y + move_y
+        rx, ry = base_center_x + eye_offset_x + move_x, base_center_y + eye_offset_y + move_y
+        r = int(self.settings.get('eye_radius', EYE_RADIUS))
+        self.canvas.coords(self.eye_left_id, lx-r, ly-r, lx+r, ly+r)
+        self.canvas.coords(self.eye_right_id, rx-r, ry-r, rx+r, ry+r)
 
     def update_position(self):
         if self.is_exiting: return
@@ -1559,8 +2070,8 @@ class HijikimameApp:
         else:
             target_x, target_y = mouse_x, mouse_y
 
-        char_center_x = self.x + self.image_width // 2
-        char_center_y = self.y + self.image_height // 2
+        char_center_x = self.x + self.image_width // 2 + self._get_center_offset()[0]
+        char_center_y = self.y + self.image_height // 2 + self._get_center_offset()[1]
         dx_char = target_x - char_center_x; dy_char = target_y - char_center_y
         distance = math.hypot(dx_char, dy_char)
         touch_margin = max(16, min(self.image_width, self.image_height) // 6)
@@ -1616,15 +2127,20 @@ class HijikimameApp:
         self._last_mouse_vy = mouse_vy
         self.last_mouse_x = mouse_x; self.last_mouse_y = mouse_y
 
-        screen_w = self.master.winfo_vrootwidth()
-        screen_h = self.master.winfo_vrootheight()
+        screen_w = max(self.master.winfo_vrootwidth(), self.master.winfo_screenwidth())
+        screen_h = max(self.master.winfo_vrootheight(), self.master.winfo_screenheight())
+        vroot_x = self.master.winfo_vrootx()
+        vroot_y = self.master.winfo_vrooty()
         strg = self.settings.get('edge_bounce_strength', EDGE_BOUNCE_STRENGTH)
         # cap to avoid extremely large velocities after reflection
         max_cap = max(screen_w, screen_h) * 0.6
         boundary_mode = self.settings.get('screen_boundary_mode', 'bounce')
         # X axis edge handling
-        if self.x < 0 or self.x > screen_w - self.image_width:
-            self.x = max(0, min(self.x, screen_w - self.image_width))
+        if self.x < vroot_x or self.x > vroot_x + screen_w - self.image_width:
+            if boundary_mode == 'destroy':
+                self.start_exit_animation()
+                return
+            self.x = max(vroot_x, min(self.x, vroot_x + screen_w - self.image_width))
             if boundary_mode == 'bounce':
                 if self.throw_cooldown > 0:
                     # reflect velocity and apply strength; do not consume remaining_bounces here
@@ -1650,8 +2166,11 @@ class HijikimameApp:
                 self.vx = 0
 
         # Y axis edge handling (same rules)
-        if self.y < 0 or self.y > screen_h - self.image_height:
-            self.y = max(0, min(self.y, screen_h - self.image_height))
+        if self.y < vroot_y or self.y > vroot_y + screen_h - self.image_height:
+            if boundary_mode == 'destroy':
+                self.start_exit_animation()
+                return
+            self.y = max(vroot_y, min(self.y, vroot_y + screen_h - self.image_height))
             if boundary_mode == 'bounce':
                 if self.throw_cooldown > 0:
                     self.vy = -self.vy * float(strg)
