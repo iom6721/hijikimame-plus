@@ -23,25 +23,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install pypresence
+          python -m pip install -r requirements.txt
           python -m pip install --upgrade pip
           pip install pyinstaller pillow requests
 
       - name: Build EXE with PyInstaller
         run: |
           pyinstaller --onefile --windowed --add-data "hijikimame_body.png;." --add-data "takoyaki.png;." --add-data "3.png;." --add-data "exit_animation.gif;." --add-data "nijiki;nijiki" --icon hijikimame_desktop.ico hijikimame_desktop.py
-
-      - name: Create GitHub Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref_name }}
-          release_name: ${{ github.ref_name }}
-          body: "Release ${{ github.ref_name }}\n\n コスメティック追加機能を追加\n顔のカスタマイズ設定を追加\ndiscordにプレイ中か表示する機能を追加\n画面端にぶつかった時の挙動を設定できる機能を追加 \n(Snapshot-2.2.5でバグがないことを確認し、追加)"
-          draft: false
-          prerelease: false
 
       - name: Generate SHA256 for EXE
         shell: bash
@@ -59,22 +47,23 @@ jobs:
           print(s)
           PY
 
-      - name: Upload EXE to Release
-        uses: actions/upload-release-asset@v1
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v1
         with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: dist/hijikimame_desktop.exe
-          asset_name: hijikimame_desktop.exe
-          asset_content_type: application/octet-stream
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload SHA256 to Release
-        uses: actions/upload-release-asset@v1
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: dist/hijikimame_desktop.exe.sha256
-          asset_name: hijikimame_desktop.exe.sha256
-          asset_content_type: text/plain
+          tag_name: ${{ github.ref_name }}
+          release_name: ${{ github.ref_name }}
+          body: |
+            Release ${{ github.ref_name }}
+            
+            コスメティック追加機能を追加
+            顔のカスタマイズ設定を追加
+            discordにプレイ中か表示する機能を追加
+            画面端にぶつかった時の挙動を設定できる機能を追加
+            (Snapshot-2.2.5でバグがないことを確認し、追加)
+          draft: false
+          prerelease: false
+          files: |
+            dist/hijikimame_desktop.exe
+            dist/hijikimame_desktop.exe.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
