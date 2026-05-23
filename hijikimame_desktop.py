@@ -25,10 +25,12 @@ try:
     import requests
 except Exception:
     requests = None
+pypresence_import_error = None
 try:
     from pypresence import Presence
 except Exception:
     Presence = None
+    pypresence_import_error = traceback.format_exc()
 import shutil
 import tempfile
 import stat
@@ -819,7 +821,10 @@ class HijikimameApp:
         if not self.settings.get('discord_presence_enabled', True):
             return
         if Presence is None:
-            self._log_discord_debug('start_discord_presence', 'pypresence module unavailable')
+            error_text = 'pypresence module unavailable'
+            if pypresence_import_error:
+                error_text += '\n' + pypresence_import_error
+            self._log_discord_debug('start_discord_presence', error_text)
             return
         try:
             self._disconnect_discord_presence()
