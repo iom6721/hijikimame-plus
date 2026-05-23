@@ -20,6 +20,7 @@ import runpy
 import threading
 import hashlib
 import re
+import traceback
 try:
     import requests
 except Exception:
@@ -107,7 +108,7 @@ DEFAULT_EYE_COLOR = 'black'
 INVERTED_EYE_COLOR = 'white'
 
 # アプリバージョン（リリースタグと一致させてください）
-VERSION = "Snapshot v2.2.1"
+VERSION = "Snapshot-v2.2.2"
 
 DISCORD_CLIENT_ID = "1507453857456721951"
 DISCORD_ACTIVITY_STATE = "※これは完全な身内ネタアプリケーションです。"
@@ -822,6 +823,7 @@ class HijikimameApp:
             self._update_discord_presence()
         except Exception:
             self.discord_presence = None
+            self._log_discord_debug('start_discord_presence', traceback.format_exc())
 
     def _update_discord_presence(self):
         if not getattr(self, 'discord_presence', None):
@@ -833,6 +835,16 @@ class HijikimameApp:
                     {"label": "GitHub", "url": DISCORD_REPO_URL}
                 ]
             )
+        except Exception:
+            self._log_discord_debug('_update_discord_presence', traceback.format_exc())
+
+    def _log_discord_debug(self, where, trace):
+        try:
+            path = os.path.join(tempfile.gettempdir(), 'hijikimame_discord.log')
+            with open(path, 'a', encoding='utf-8') as f:
+                f.write(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {where}\n')
+                f.write(trace)
+                f.write('\n')
         except Exception:
             pass
 
