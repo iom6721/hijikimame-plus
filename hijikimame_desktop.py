@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import messagebox, filedialog
-from PIL import Image, ImageTk, ImageGrab, ImageChops
+from PIL import Image, ImageTk, ImageGrab, ImageChops, ImageDraw
 import collections
 try:
     Image.MAX_IMAGE_PIXELS = None
@@ -31,6 +31,18 @@ try:
 except Exception:
     Presence = None
     pypresence_import_error = traceback.format_exc()
+try:
+    import pyautogui
+except Exception:
+    pyautogui = None
+try:
+    import cv2
+    import numpy as np
+    CV2_AVAILABLE = True
+except Exception:
+    cv2 = None
+    np = None
+    CV2_AVAILABLE = False
 import shutil
 import tempfile
 import stat
@@ -100,7 +112,7 @@ TAKOYAKI_IMAGE_PATH = "takoyaki.png"
 # --- 目の描画に関する設定 ---
 EYE_RADIUS = 3      
 EYE_OFFSET_X = 10   
-EYE_OFFSET_Y = -3   
+EYE_OFFSET_Y = 3   
 CENTER_OFFSET_X = 0
 CENTER_OFFSET_Y = 0
 EYE_MOVEMENT_LIMIT = 4 
@@ -306,11 +318,14 @@ class HijikimameApp:
             'edge_bounce_strength': EDGE_BOUNCE_STRENGTH,
             'mouse_repulsion_enabled': True,
             'screen_boundary_mode': 'bounce',
-            'discord_presence_enabled': True,
             'custom_cosmetics': [],
             'show_cosmetic_warning': True,
-            'character_scale': 1.0,
-            'eye_radius': EYE_RADIUS,
+            'character_scale': 100.0,
+            'eye_radius': 100.0,
+            'image_tracking_force_fullscreen': False,
+            'image_tracking_min_match_score': 0.6,
+            'eye_movement_limit': EYE_MOVEMENT_LIMIT,
+            'image_tracking_interval': 1.0,
         }
 
         try:
@@ -337,20 +352,18 @@ class HijikimameApp:
         self.target_image_template = None
         self.target_image_last_search = 0.0
         self._target_image_search_in_progress = False
-
-        self.settings.setdefault('tracking_target_mode', 0)
-        self.settings.setdefault('target_position', None)
-        self.settings.setdefault('target_image_path', None)
-        self.settings.setdefault('selected_mode', 0)
-        self.settings.setdefault('screen_boundary_mode', 'bounce')
-        self.settings.setdefault('custom_cosmetics', [])
-        self.settings.setdefault('show_cosmetic_warning', True)
+        self._target_image_search_requested = False
+        self._target_image_lost = False
         self.settings.setdefault('eye_offset_x', EYE_OFFSET_X)
         self.settings.setdefault('eye_offset_y', EYE_OFFSET_Y)
         self.settings.setdefault('center_offset_x', CENTER_OFFSET_X)
         self.settings.setdefault('center_offset_y', CENTER_OFFSET_Y)
-        self.settings.setdefault('character_scale', 1.0)
-        self.settings.setdefault('eye_radius', EYE_RADIUS)
+        self.settings.setdefault('character_scale', 100.0)
+        self.settings.setdefault('eye_radius', 100.0)
+        self.settings.setdefault('image_tracking_min_match_score', 0.6)
+        self.settings.setdefault('eye_movement_limit', EYE_MOVEMENT_LIMIT)
+        self.settings.setdefault('image_tracking_interval', 1.0)
+        self.settings.setdefault('image_tracking_force_fullscreen', False)
         self._normalize_custom_cosmetics()
 
         if isinstance(self.settings.get('target_position'), list) and len(self.settings.get('target_position')) == 2:
@@ -383,6 +396,7 @@ class HijikimameApp:
             
         # Apply character scale to the initially displayed image
         display_img = self._get_display_image(self.original_image)
+        self.current_display_image = display_img
         self.image_width, self.image_height = display_img.size
         self.tk_image = ImageTk.PhotoImage(display_img)
 
@@ -461,6 +475,7 @@ class HijikimameApp:
         self._discord_presence_retry_delay_ms = 30000
         self._discord_presence_retry_scheduled = False
         self.master.after(500, self.start_update_check_thread)
+        self.master.after(1000, self._cleanup_update_file)
         try:
             self.start_discord_presence()
         except:
@@ -742,6 +757,23 @@ class HijikimameApp:
         except Exception:
             pass
 
+    def _cleanup_update_file(self):
+        """アップデート完了後、.update.exe ファイルを削除する"""
+        if getattr(sys, 'frozen', False):
+            try:
+                exe_name = os.path.basename(sys.executable)
+                exe_dir = os.path.dirname(sys.executable)
+                update_exe_path = os.path.join(exe_dir, exe_name + ".update.exe")
+                if os.path.exists(update_exe_path):
+                    try:
+                        os.remove(update_exe_path)
+                    except PermissionError:
+                        pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
     def start_update_check_thread(self):
         try:
             t = threading.Thread(target=self._check_and_initiate_update, daemon=True)
@@ -818,8 +850,6 @@ class HijikimameApp:
             return
 
     def start_discord_presence(self):
-        if not self.settings.get('discord_presence_enabled', True):
-            return
         if Presence is None:
             error_text = 'pypresence module unavailable'
             if pypresence_import_error:
@@ -942,6 +972,7 @@ class HijikimameApp:
 
         if should_update_image:
             display_img = self._get_display_image(new_image)
+            self.current_display_image = display_img
             try:
                 self._apply_image_size(display_img)
             except:
@@ -1035,7 +1066,7 @@ class HijikimameApp:
 
     def _get_display_image(self, image):
         try:
-            scale = float(self.settings.get('character_scale', 1.0))
+            scale = float(self.settings.get('character_scale', 100.0)) / 100.0
         except:
             scale = 1.0
         if image is None or scale == 1.0:
@@ -1063,8 +1094,18 @@ class HijikimameApp:
         ly = base_center_y + eye_offset_y
         rx = base_center_x + eye_offset_x
         ry = base_center_y + eye_offset_y
-        r = int(self.settings.get('eye_radius', EYE_RADIUS))
+        eye_size_percent = float(self.settings.get('eye_radius', 100.0))
+        r = max(0, int(EYE_RADIUS * eye_size_percent / 100.0))
+        if r == 0:
+            try:
+                self.canvas.itemconfigure(self.eye_left_id, state='hidden')
+                self.canvas.itemconfigure(self.eye_right_id, state='hidden')
+            except:
+                pass
+            return
         try:
+            self.canvas.itemconfigure(self.eye_left_id, state='normal')
+            self.canvas.itemconfigure(self.eye_right_id, state='normal')
             self.canvas.coords(self.eye_left_id, lx-r, ly-r, lx+r, ly+r)
             self.canvas.coords(self.eye_right_id, rx-r, ry-r, rx+r, ry+r)
         except:
@@ -1194,6 +1235,7 @@ class HijikimameApp:
 
         if should_update_image:
             display_img = self._get_display_image(new_image)
+            self.current_display_image = display_img
             try:
                 self._apply_image_size(display_img)
             except:
@@ -1410,27 +1452,229 @@ class HijikimameApp:
         try:
             if ImageGrab is None:
                 return None
-            return ImageGrab.grab()
+            # Temporarily hide canvas items (character + eyes) so they don't occlude the desktop
+            hidden_items = []
+            try:
+                if hasattr(self, 'canvas'):
+                    for item in self.canvas.find_all():
+                        try:
+                            prev = self.canvas.itemcget(item, 'state')
+                        except:
+                            prev = None
+                        try:
+                            self.canvas.itemconfigure(item, state='hidden')
+                            hidden_items.append((item, prev))
+                        except:
+                            pass
+                    try:
+                        self.master.update()
+                        time.sleep(0.02)
+                    except:
+                        pass
+            except:
+                hidden_items = []
+
+            try:
+                screen = ImageGrab.grab()
+            finally:
+                # restore previously-hidden items
+                try:
+                    for item, prev in hidden_items:
+                        try:
+                            if prev and prev != '':
+                                self.canvas.itemconfigure(item, state=prev)
+                            else:
+                                self.canvas.itemconfigure(item, state='normal')
+                        except:
+                            pass
+                    try:
+                        self.master.update()
+                    except:
+                        pass
+                except:
+                    pass
+
+            try:
+                x = self.master.winfo_rootx()
+                y = self.master.winfo_rooty()
+                w = self.master.winfo_width()
+                h = self.master.winfo_height()
+                if w > 0 and h > 0:
+                    if getattr(self, 'current_display_image', None) is not None and self.current_display_image.mode == 'RGBA':
+                        mask = self.current_display_image.split()[3]
+                        if mask.size == (w, h):
+                            screen.paste((255, 0, 255), (x, y), mask)
+                        else:
+                            draw = ImageDraw.Draw(screen)
+                            draw.rectangle([x, y, x + w, y + h], fill=(255, 0, 255))
+                    else:
+                        draw = ImageDraw.Draw(screen)
+                        draw.rectangle([x, y, x + w, y + h], fill=(255, 0, 255))
+            except:
+                pass
+            return screen
         except:
+            return None
+
+    def _find_template_on_screen_cv(self, screen, template, region=None):
+        """OpenCVベースの高速テンプレートマッチ。画面とテンプレートは PIL Image。
+        戻り値: (center_x, center_y, score) または None
+        """
+        if not CV2_AVAILABLE:
+            return None
+        try:
+            # Crop to region if provided (region: (x,y,w,h))
+            region_offset_x = 0
+            region_offset_y = 0
+            proc_screen = screen
+            if region is not None:
+                rx, ry, rw, rh = region
+                proc_screen = screen.crop((rx, ry, rx + rw, ry + rh))
+                region_offset_x = rx
+                region_offset_y = ry
+
+            # Convert to color BGR numpy arrays for OpenCV (no grayscale choice)
+            screen_np = np.array(proc_screen.convert('RGB'))
+            template_np = np.array(template.convert('RGB'))
+            # Convert RGB->BGR for OpenCV
+            screen_bgr = cv2.cvtColor(screen_np, cv2.COLOR_RGB2BGR)
+            template_bgr = cv2.cvtColor(template_np, cv2.COLOR_RGB2BGR)
+
+            sh, sw = screen_bgr.shape[:2]
+            th, tw = template_bgr.shape[:2]
+            if tw > sw or th > sh:
+                return None
+
+            best_score = -1.0
+            best_loc = None
+            best_size = (tw, th)
+
+            # Try a limited set of scales around 1.0 for speed and robustness
+            scales = [1.0, 0.9, 1.1, 0.8, 1.25]
+            screen_bgr_f = screen_bgr.astype(np.float32)
+            for scale in scales:
+                rw_t = max(6, int(tw * scale))
+                rh_t = max(6, int(th * scale))
+                if rw_t > sw or rh_t > sh:
+                    continue
+                try:
+                    tmpl_resized = cv2.resize(template_bgr, (rw_t, rh_t), interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR)
+                    tmpl_resized_f = tmpl_resized.astype(np.float32)
+                except Exception:
+                    continue
+                try:
+                    res = cv2.matchTemplate(screen_bgr_f, tmpl_resized_f, cv2.TM_CCOEFF_NORMED)
+                except Exception:
+                    continue
+                _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                if max_val > best_score:
+                    best_score = float(max_val)
+                    best_loc = max_loc
+                    best_size = (rw_t, rh_t)
+
+            if best_loc is None:
+                return None
+
+            min_score = float(self.settings.get('image_tracking_min_match_score', 0.6))
+            if best_score < min_score:
+                return None
+
+            bx, by = best_loc
+            bw, bh = best_size
+            center_x = int(region_offset_x + bx + bw / 2)
+            center_y = int(region_offset_y + by + bh / 2)
+            return (center_x, center_y, best_score)
+        except Exception:
             return None
 
     def _search_target_image_on_screen(self, force=False):
         if self.target_image_template is None:
             return
         now = time.time()
-        if not force and now - self.target_image_last_search < 2.0:
+        tracking_interval = float(self.settings.get('image_tracking_interval', 1.0))
+        if not force and now - self.target_image_last_search < tracking_interval:
             return
         if self._target_image_search_in_progress:
+            self._target_image_search_requested = True
             return
+        self._target_image_search_requested = False
         self._target_image_search_in_progress = True
         self.target_image_last_search = now
         template = self.target_image_template.copy()
         def worker():
             result = None
             try:
-                screen = self._grab_screen()
-                if screen is not None:
-                    result = self._find_template_on_screen(screen, template)
+                # Enforce OpenCV-only tracking for speed and accuracy.
+                if not CV2_AVAILABLE:
+                    result = None
+                    def _notify_no_cv():
+                        try:
+                            messagebox.showwarning('画像追跡エラー', 'OpenCV が必要です。OpenCV をインストールしてください。')
+                        except:
+                            pass
+                        try:
+                            self.settings['tracking_target_mode'] = 0
+                            self.save_settings_file()
+                            self.broadcast_settings()
+                            self._update_target_status_labels()
+                        except:
+                            pass
+                    try:
+                        self.master.after(0, _notify_no_cv)
+                    except:
+                        pass
+                else:
+                    screen = self._grab_screen()
+                    if screen is not None:
+                        # Save debug captures for analysis
+                        try:
+                            dbg_ts = int(time.time() * 1000)
+                            dbg_dir = os.path.join(tempfile.gettempdir(), 'hijikimame_debug')
+                            try:
+                                os.makedirs(dbg_dir, exist_ok=True)
+                            except:
+                                pass
+                            full_path = os.path.join(dbg_dir, f'dbg_{dbg_ts}_full.png')
+                            try:
+                                screen.save(full_path)
+                                print('DEBUG: saved full screen ->', full_path)
+                            except Exception:
+                                pass
+                            tmpl_path = os.path.join(dbg_dir, f'dbg_{dbg_ts}_template.png')
+                            try:
+                                template.save(tmpl_path)
+                                print('DEBUG: saved template ->', tmpl_path)
+                            except Exception:
+                                pass
+                            if region is not None:
+                                try:
+                                    rx, ry, rw, rh = region
+                                    region_img = screen.crop((rx, ry, rx + rw, ry + rh))
+                                    region_path = os.path.join(dbg_dir, f'dbg_{dbg_ts}_region.png')
+                                    region_img.save(region_path)
+                                    print('DEBUG: saved region ->', region_path)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        # If configured, force full-screen search; otherwise prioritize nearby region
+                        force_fullscreen = bool(self.settings.get('image_tracking_force_fullscreen', False))
+                        region = None
+                        if not force_fullscreen and self.target_position:
+                            px, py = self.target_position
+                            region_size = 600
+                            region = (
+                                max(0, int(px - region_size // 2)),
+                                max(0, int(py - region_size // 2)),
+                                region_size,
+                                region_size
+                            )
+                        # First try region-based CV search for speed
+                        res_cv = self._find_template_on_screen_cv(screen, template, region=region)
+                        result = res_cv
+                        # If not found in region, try full-screen CV search
+                        if result is None and region is not None:
+                            result = self._find_template_on_screen_cv(screen, template, region=None)
             except:
                 result = None
             try:
@@ -1441,41 +1685,57 @@ class HijikimameApp:
 
     def _finish_target_image_search(self, result):
         self._target_image_search_in_progress = False
+        if self.settings.get('tracking_target_mode') != 2 or self.target_image_path != self.settings.get('target_image_path'):
+            if self._target_image_search_requested:
+                self._target_image_search_requested = False
+            return
+        had_previous_position = self.target_position is not None
         if result:
             x, y, score = result
             self.target_position = (x, y)
             self.settings['target_position'] = [x, y]
+            self._target_image_lost = False
         else:
-            self.target_position = None
-            self.settings['target_position'] = None
+            if had_previous_position:
+                # Keep the last known location and stay in place until the target is found again.
+                self._target_image_lost = True
+            else:
+                self.target_position = None
+                self.settings['target_position'] = None
+                self._target_image_lost = False
         self._update_target_status_labels()
+        if self._target_image_search_requested:
+            self._target_image_search_requested = False
+            self._search_target_image_on_screen(force=True)
 
     def _find_template_on_screen(self, screen, template):
         try:
-            screen_gray_full = screen.convert('L')
-            screen_gray = screen_gray_full
-            template_gray = template.convert('L')
-            sw, sh = screen_gray.size
-            tw, th = template_gray.size
+            # Always operate in RGB (color) for fallback; no grayscale option
+            screen_proc_full = screen.convert('RGB')
+            screen_proc = screen_proc_full
+            template_proc = template.convert('RGB')
+            sw, sh = screen_proc.size
+            tw, th = template_proc.size
             if tw > sw or th > sh:
                 return None
             scale = 1.0
             if sw > 800 or sh > 800:
                 scale = max(sw / 800.0, sh / 800.0)
-                screen_gray = screen_gray.resize((max(1, int(sw / scale)), max(1, int(sh / scale))), Image.LANCZOS)
-                template_gray = template_gray.resize((max(1, int(tw / scale)), max(1, int(th / scale))), Image.LANCZOS)
-            tw2, th2 = template_gray.size
+                screen_proc = screen_proc.resize((max(1, int(sw / scale)), max(1, int(sh / scale))), Image.LANCZOS)
+                template_proc = template_proc.resize((max(1, int(tw / scale)), max(1, int(th / scale))), Image.LANCZOS)
+            tw2, th2 = template_proc.size
             if tw2 < 8 or th2 < 8:
                 return None
             step = max(1, min(4, max(1, tw2 // 16), max(1, th2 // 16)))
-            small_template = template_gray.resize((64, 64), Image.LANCZOS)
+            small_template = template_proc.resize((64, 64), Image.LANCZOS)
             best_score = None
             best_xy = None
-            for y in range(0, screen_gray.height - th2 + 1, step):
-                for x in range(0, screen_gray.width - tw2 + 1, step):
-                    patch = screen_gray.crop((x, y, x + tw2, y + th2)).resize((64, 64), Image.LANCZOS)
+            for y in range(0, screen_proc.height - th2 + 1, step):
+                for x in range(0, screen_proc.width - tw2 + 1, step):
+                    patch = screen_proc.crop((x, y, x + tw2, y + th2)).resize((64, 64), Image.LANCZOS)
                     diff = ImageChops.difference(patch, small_template)
-                    score = sum(diff.getdata())
+                    # color diff: sum of channel sums
+                    score = sum(sum(px) for px in diff.getdata())
                     if best_score is None or score < best_score:
                         best_score = score
                         best_xy = (x, y)
@@ -1485,11 +1745,11 @@ class HijikimameApp:
             bx, by = best_xy
             refine_radius = max(8, step * 2)
             refined_score = best_score
-            for y in range(max(0, by - refine_radius), min(screen_gray.height - th2, by + refine_radius) + 1):
-                for x in range(max(0, bx - refine_radius), min(screen_gray.width - tw2, bx + refine_radius) + 1):
-                    patch = screen_gray.crop((x, y, x + tw2, y + th2)).resize((64, 64), Image.LANCZOS)
+            for y in range(max(0, by - refine_radius), min(screen_proc.height - th2, by + refine_radius) + 1):
+                for x in range(max(0, bx - refine_radius), min(screen_proc.width - tw2, bx + refine_radius) + 1):
+                    patch = screen_proc.crop((x, y, x + tw2, y + th2)).resize((64, 64), Image.LANCZOS)
                     diff = ImageChops.difference(patch, small_template)
-                    score = sum(diff.getdata())
+                    score = sum(sum(px) for px in diff.getdata())
                     if score < refined_score:
                         refined_score = score
                         bx, by = x, y
@@ -1504,9 +1764,9 @@ class HijikimameApp:
                 step2 = max(1, min(2, full_radius // 4))
                 for y in range(max(0, orig_by - full_radius), min(sh - th, orig_by + full_radius) + 1, step2):
                     for x in range(max(0, orig_bx - full_radius), min(sw - tw, orig_bx + full_radius) + 1, step2):
-                        patch = screen_gray_full.crop((x, y, x + tw, y + th)).resize((64, 64), Image.LANCZOS)
+                        patch = screen_proc_full.crop((x, y, x + tw, y + th)).resize((64, 64), Image.LANCZOS)
                         diff = ImageChops.difference(patch, small_template)
-                        score = sum(diff.getdata())
+                        score = sum(sum(px) for px in diff.getdata())
                         if score < final_score:
                             final_score = score
                             final_bx = x
@@ -1603,7 +1863,7 @@ class HijikimameApp:
         content_canvas.pack(side='left', fill='both', expand=True)
         content_scroll.pack(side='right', fill='y')
         self._edit_win.geometry('400x520')
-        self._edit_win.minsize(450, 650)
+        self._edit_win.minsize(525, 750)
 
         # キャラクター選択
         char_frame = tk.LabelFrame(self._edit_frame, text='キャラクター選択')
@@ -1660,20 +1920,19 @@ class HijikimameApp:
         self._refresh_character_buttons()
 
         repulsion_var = tk.IntVar(value=1 if self.settings.get('mouse_repulsion_enabled', True) else 0)
+        self.repulsion_var = repulsion_var
         repulsion_cb = tk.Checkbutton(self._edit_frame, text="ひじき豆の反発", variable=repulsion_var)
         repulsion_cb.pack(anchor='w', padx=8, pady=2)
 
         tk.Label(self._edit_frame, text="画面端の挙動:").pack(anchor='w', padx=8)
         boundary_mode_var = tk.StringVar(value=self.settings.get('screen_boundary_mode', 'bounce'))
+        self.boundary_mode_var = boundary_mode_var
         boundary_menu = tk.OptionMenu(self._edit_frame, boundary_mode_var, 'bounce', 'stop', 'destroy')
         boundary_menu.config(width=20)
         boundary_menu.pack(fill='x', padx=8, pady=2)
 
-        discord_presence_var = tk.IntVar(value=1 if self.settings.get('discord_presence_enabled', True) else 0)
-        discord_presence_cb = tk.Checkbutton(self._edit_frame, text="Discord に状態を表示する", variable=discord_presence_var)
-        discord_presence_cb.pack(anchor='w', padx=8, pady=2)
-
         show_warning_var = tk.IntVar(value=1 if self.settings.get('show_cosmetic_warning', True) else 0)
+        self.show_warning_var = show_warning_var
         show_warning_cb = tk.Checkbutton(self._edit_frame, text="コスメ追加時の警告を表示する", variable=show_warning_var)
         show_warning_cb.pack(anchor='w', padx=8, pady=2)
 
@@ -1709,17 +1968,23 @@ class HijikimameApp:
         self.center_y_scale.set(-self.settings.get('center_offset_y', CENTER_OFFSET_Y))
         self.center_y_scale.pack(fill='x', padx=4)
 
-        # キャラの大きさ（スケーリング）
-        tk.Label(adjust_frame, text='キャラの大きさ:').pack(anchor='w', padx=4, pady=2)
-        self.char_scale = tk.Scale(adjust_frame, from_=0.1, to=3.0, resolution=0.01, orient='horizontal')
-        self.char_scale.set(self.settings.get('character_scale', 1.0))
+        # キャラの大きさ（0～200%）
+        tk.Label(adjust_frame, text='キャラの大きさ (%):').pack(anchor='w', padx=4, pady=2)
+        self.char_scale = tk.Scale(adjust_frame, from_=0, to=200, orient='horizontal')
+        self.char_scale.set(self.settings.get('character_scale', 100.0))
         self.char_scale.pack(fill='x', padx=4)
 
-        # 目の大きさ
-        tk.Label(adjust_frame, text='目の大きさ:').pack(anchor='w', padx=4, pady=2)
-        self.eye_size_scale = tk.Scale(adjust_frame, from_=0, to=64, orient='horizontal')
-        self.eye_size_scale.set(self.settings.get('eye_radius', EYE_RADIUS))
+        # 目の大きさ（0～200%）
+        tk.Label(adjust_frame, text='目の大きさ (%):').pack(anchor='w', padx=4, pady=2)
+        self.eye_size_scale = tk.Scale(adjust_frame, from_=0, to=200, orient='horizontal')
+        self.eye_size_scale.set(self.settings.get('eye_radius', 100.0))
         self.eye_size_scale.pack(fill='x', padx=4)
+
+        # 目の動く範囲
+        tk.Label(adjust_frame, text='目の動く範囲:').pack(anchor='w', padx=4, pady=2)
+        self.eye_movement_scale = tk.Scale(adjust_frame, from_=0, to=20, orient='horizontal')
+        self.eye_movement_scale.set(self.settings.get('eye_movement_limit', EYE_MOVEMENT_LIMIT))
+        self.eye_movement_scale.pack(fill='x', padx=4)
 
         tk.Label(self._edit_frame, text="追尾速度:").pack(anchor='w', padx=8)
         self.tracking_scale = tk.Scale(self._edit_frame, from_=0.0, to=0.1, resolution=0.001, orient='horizontal')
@@ -1735,6 +2000,19 @@ class HijikimameApp:
         self.max_throw_scale = tk.Scale(self._edit_frame, from_=1, to=50, orient='horizontal')
         self.max_throw_scale.set(self.settings.get('max_throw_multiplier', 15))
         self.max_throw_scale.pack(fill='x', padx=8)
+
+        tk.Label(self._edit_frame, text="画像追尾間隔 (秒):").pack(anchor='w', padx=8)
+        self.image_tracking_scale = tk.Scale(self._edit_frame, from_=0.0, to=2.0, resolution=0.1, orient='horizontal')
+        self.image_tracking_scale.set(self.settings.get('image_tracking_interval', 1.0))
+        self.image_tracking_scale.pack(fill='x', padx=8)
+        fullscreen_var = tk.IntVar(value=1 if self.settings.get('image_tracking_force_fullscreen', False) else 0)
+        self.fullscreen_var = fullscreen_var
+        fullscreen_cb = tk.Checkbutton(self._edit_frame, text="軽量化: 全画面追尾を常に行う", variable=fullscreen_var)
+        fullscreen_cb.pack(anchor='w', padx=8, pady=2)
+        tk.Label(self._edit_frame, text="軽量化: 追尾受理最低スコア:").pack(anchor='w', padx=8)
+        self.image_tracking_score_scale = tk.Scale(self._edit_frame, from_=0.0, to=1.0, resolution=0.01, orient='horizontal')
+        self.image_tracking_score_scale.set(self.settings.get('image_tracking_min_match_score', 0.6))
+        self.image_tracking_score_scale.pack(fill='x', padx=8, pady=(0,8))
 
         tk.Label(self._edit_frame, text="画面端バウンド回数:").pack(anchor='w', padx=8)
         self.bounce_scale = tk.Scale(self._edit_frame, from_=0, to=20, orient='horizontal')
@@ -1760,7 +2038,6 @@ class HijikimameApp:
             self.settings['edge_bounce_count'] = int(self.bounce_scale.get())
             self.settings['edge_bounce_strength'] = float(self.bounce_strength_scale.get())
             self.settings['screen_boundary_mode'] = boundary_mode_var.get()
-            self.settings['discord_presence_enabled'] = bool(discord_presence_var.get())
             self.settings['show_cosmetic_warning'] = bool(show_warning_var.get())
             self.settings['eye_offset_x'] = int(self.eye_x_scale.get())
             # Y軸はUI上で向きを反転して扱う
@@ -1768,12 +2045,28 @@ class HijikimameApp:
             self.settings['center_offset_x'] = int(self.center_x_scale.get())
             # Y軸はUI上で向きを反転して扱う
             self.settings['center_offset_y'] = -int(self.center_y_scale.get())
-            # キャラと目のサイズ
+            # キャラと目のサイズ（%表記）
             try:
                 self.settings['character_scale'] = float(self.char_scale.get())
             except:
-                self.settings['character_scale'] = 1.0
-            self.settings['eye_radius'] = int(self.eye_size_scale.get())
+                self.settings['character_scale'] = 100.0
+            try:
+                self.settings['eye_radius'] = float(self.eye_size_scale.get())
+            except:
+                self.settings['eye_radius'] = 100.0
+            try:
+                self.settings['eye_movement_limit'] = float(self.eye_movement_scale.get())
+            except:
+                self.settings['eye_movement_limit'] = EYE_MOVEMENT_LIMIT
+            try:
+                self.settings['image_tracking_interval'] = float(self.image_tracking_scale.get())
+            except:
+                self.settings['image_tracking_interval'] = 1.0
+            self.settings['image_tracking_force_fullscreen'] = bool(fullscreen_var.get())
+            try:
+                self.settings['image_tracking_min_match_score'] = float(self.image_tracking_score_scale.get())
+            except:
+                self.settings['image_tracking_min_match_score'] = 0.6
             if not self.is_dragging_stop and self.throw_cooldown == 0:
                 self.remaining_bounces = self.settings.get('edge_bounce_count', EDGE_BOUNCE_COUNT_DEFAULT)
             try:
@@ -1808,18 +2101,22 @@ class HijikimameApp:
             self.settings['edge_bounce_strength'] = EDGE_BOUNCE_STRENGTH
             self.settings['mouse_repulsion_enabled'] = True
             self.settings['screen_boundary_mode'] = 'bounce'
-            self.settings['discord_presence_enabled'] = True
             self.settings['show_cosmetic_warning'] = True
             self.settings['selected_mode'] = 0
             self.settings['tracking_target_mode'] = 0
             self.settings['target_position'] = None
             self.settings['target_image_path'] = None
+            self.settings['custom_cosmetics'] = []
             self.settings['eye_offset_x'] = EYE_OFFSET_X
             self.settings['eye_offset_y'] = EYE_OFFSET_Y
             self.settings['center_offset_x'] = CENTER_OFFSET_X
             self.settings['center_offset_y'] = CENTER_OFFSET_Y
-            self.settings['character_scale'] = 1.0
-            self.settings['eye_radius'] = EYE_RADIUS
+            self.settings['character_scale'] = 100.0
+            self.settings['eye_radius'] = 100.0
+            self.settings['eye_movement_limit'] = EYE_MOVEMENT_LIMIT
+            self.settings['image_tracking_interval'] = 1.0
+            self.settings['image_tracking_force_fullscreen'] = False
+            self.settings['image_tracking_min_match_score'] = 0.6
             self.target_position = None
             self.target_image_path = None
             self.target_image_template = None
@@ -1835,15 +2132,23 @@ class HijikimameApp:
             repulsion_var.set(1)
             show_warning_var.set(1)
             boundary_mode_var.set('bounce')
+            fullscreen_var.set(0)
             # スライダー側の表示値は Y を反転しているので注意
             self.eye_x_scale.set(EYE_OFFSET_X)
             self.eye_y_scale.set(-EYE_OFFSET_Y)
             self.center_x_scale.set(CENTER_OFFSET_X)
             self.center_y_scale.set(-CENTER_OFFSET_Y)
-            self.char_scale.set(1.0)
-            self.eye_size_scale.set(EYE_RADIUS)
+            self.char_scale.set(100.0)
+            self.eye_size_scale.set(100.0)
+            self.eye_movement_scale.set(EYE_MOVEMENT_LIMIT)
+            self.image_tracking_scale.set(1.0)
+            self.image_tracking_score_scale.set(0.6)
             try:
                 self._refresh_character_buttons()
+            except:
+                pass
+            try:
+                self._refresh_custom_cosmetic_listbox()
             except:
                 pass
             self.set_mode(0)
@@ -1947,8 +2252,50 @@ class HijikimameApp:
             for k, v in data.items():
                 self.settings[k] = v
             # Ensure our keys and types
-            self.settings.setdefault('character_scale', 1.0)
-            self.settings.setdefault('eye_radius', EYE_RADIUS)
+            self.settings.setdefault('tracking_speed', TRACKING_SPEED)
+            self.settings.setdefault('throw_speed_multiplier', 2.5)
+            self.settings.setdefault('max_throw_multiplier', 10)
+            self.settings.setdefault('edge_bounce_count', EDGE_BOUNCE_COUNT_DEFAULT)
+            self.settings.setdefault('edge_bounce_strength', EDGE_BOUNCE_STRENGTH)
+            self.settings.setdefault('mouse_repulsion_enabled', True)
+            self.settings.setdefault('screen_boundary_mode', 'bounce')
+            self.settings.setdefault('show_cosmetic_warning', True)
+            self.settings.setdefault('nijiki_fps', NIJIKI_DEFAULT_FPS)
+            self.settings.setdefault('selected_mode', 0)
+            self.settings.setdefault('tracking_target_mode', 0)
+            self.settings.setdefault('target_position', None)
+            self.settings.setdefault('target_image_path', None)
+            self.settings.setdefault('custom_cosmetics', [])
+            self.settings.setdefault('image_tracking_force_fullscreen', False)
+            self.settings.setdefault('image_tracking_min_match_score', 0.6)
+            self.settings.setdefault('character_scale', 100.0)
+            self.settings.setdefault('eye_radius', 100.0)
+            self.settings.setdefault('eye_movement_limit', EYE_MOVEMENT_LIMIT)
+            self.settings.setdefault('image_tracking_interval', 1.0)
+            try:
+                if isinstance(self.settings.get('target_position'), list) and len(self.settings.get('target_position')) == 2:
+                    try:
+                        self.target_position = (int(self.settings['target_position'][0]), int(self.settings['target_position'][1]))
+                    except:
+                        self.target_position = None
+                else:
+                    self.target_position = None
+            except:
+                self.target_position = None
+            if self.settings.get('target_image_path'):
+                self.target_image_path = self.settings.get('target_image_path')
+                try:
+                    self.target_image_template = self.load_image(self.target_image_path)
+                except:
+                    self.target_image_template = None
+                if self.target_image_template is None:
+                    self.target_image_path = None
+                    self.settings['target_image_path'] = None
+                    if int(self.settings.get('tracking_target_mode', 0)) == 2:
+                        self.settings['tracking_target_mode'] = 0
+            else:
+                self.target_image_path = None
+                self.target_image_template = None
             try:
                 self.settings['eye_offset_x'] = int(self.settings.get('eye_offset_x', EYE_OFFSET_X))
             except:
@@ -1966,13 +2313,21 @@ class HijikimameApp:
             except:
                 self.settings['center_offset_y'] = CENTER_OFFSET_Y
             try:
-                self.settings['character_scale'] = float(self.settings.get('character_scale', 1.0))
+                self.settings['character_scale'] = float(self.settings.get('character_scale', 100.0))
             except:
-                self.settings['character_scale'] = 1.0
+                self.settings['character_scale'] = 100.0
             try:
-                self.settings['eye_radius'] = int(self.settings.get('eye_radius', EYE_RADIUS))
+                self.settings['eye_radius'] = float(self.settings.get('eye_radius', 100.0))
             except:
-                self.settings['eye_radius'] = EYE_RADIUS
+                self.settings['eye_radius'] = 100.0
+            try:
+                self.settings['eye_movement_limit'] = float(self.settings.get('eye_movement_limit', EYE_MOVEMENT_LIMIT))
+            except:
+                self.settings['eye_movement_limit'] = EYE_MOVEMENT_LIMIT
+            try:
+                self.settings['image_tracking_interval'] = float(self.settings.get('image_tracking_interval', 1.0))
+            except:
+                self.settings['image_tracking_interval'] = 1.0
             # persist
             try:
                 self.save_settings_file()
@@ -1986,8 +2341,19 @@ class HijikimameApp:
                         self.eye_y_scale.set(-self.settings.get('eye_offset_y', EYE_OFFSET_Y))
                         self.center_x_scale.set(self.settings.get('center_offset_x', CENTER_OFFSET_X))
                         self.center_y_scale.set(-self.settings.get('center_offset_y', CENTER_OFFSET_Y))
-                        self.char_scale.set(self.settings.get('character_scale', 1.0))
-                        self.eye_size_scale.set(self.settings.get('eye_radius', EYE_RADIUS))
+                        self.char_scale.set(self.settings.get('character_scale', 100.0))
+                        self.eye_size_scale.set(self.settings.get('eye_radius', 100.0))
+                        self.eye_movement_scale.set(self.settings.get('eye_movement_limit', EYE_MOVEMENT_LIMIT))
+                        self.image_tracking_scale.set(self.settings.get('image_tracking_interval', 1.0))
+                        self.image_tracking_score_scale.set(self.settings.get('image_tracking_min_match_score', 0.6))
+                        if hasattr(self, 'fullscreen_var'):
+                            self.fullscreen_var.set(1 if self.settings.get('image_tracking_force_fullscreen', False) else 0)
+                        if hasattr(self, 'repulsion_var'):
+                            self.repulsion_var.set(1 if self.settings.get('mouse_repulsion_enabled', True) else 0)
+                        if hasattr(self, 'boundary_mode_var'):
+                            self.boundary_mode_var.set(self.settings.get('screen_boundary_mode', 'bounce'))
+                        if hasattr(self, 'show_warning_var'):
+                            self.show_warning_var.set(1 if self.settings.get('show_cosmetic_warning', True) else 0)
                         self.tracking_scale.set(self.settings.get('tracking_speed', TRACKING_SPEED))
                         self.throw_scale.set(self.settings.get('throw_speed_multiplier', 2.5))
                         self.max_throw_scale.set(self.settings.get('max_throw_multiplier', 10))
@@ -2050,6 +2416,19 @@ class HijikimameApp:
             self.update_eyes_only()
 
     def update_eyes_only(self):
+        eye_size_percent = float(self.settings.get('eye_radius', 100.0))
+        if eye_size_percent == 0:
+            try:
+                self.canvas.itemconfigure(self.eye_left_id, state='hidden')
+                self.canvas.itemconfigure(self.eye_right_id, state='hidden')
+            except:
+                pass
+            return
+        try:
+            self.canvas.itemconfigure(self.eye_left_id, state='normal')
+            self.canvas.itemconfigure(self.eye_right_id, state='normal')
+        except:
+            pass
         mouse_x = self.master.winfo_pointerx()
         mouse_y = self.master.winfo_pointery()
         char_center_x = self.x + self.image_width // 2 + self._get_center_offset()[0]
@@ -2060,14 +2439,15 @@ class HijikimameApp:
             dx_u, dy_u = dx / dist, dy / dist
         else:
             dx_u, dy_u = 0, 0
-        move_dist = min(dist * 0.1, EYE_MOVEMENT_LIMIT)
+        eye_movement_limit = float(self.settings.get('eye_movement_limit', EYE_MOVEMENT_LIMIT))
+        move_dist = min(dist * 0.1, eye_movement_limit)
         move_x, move_y = dx_u * move_dist, dy_u * move_dist
         base_center_x = self.image_width // 2 + self._get_center_offset()[0]
         base_center_y = self.image_height // 2 + self._get_center_offset()[1]
         eye_offset_x, eye_offset_y = self._get_eye_offset()
         lx, ly = base_center_x - eye_offset_x + move_x, base_center_y + eye_offset_y + move_y
         rx, ry = base_center_x + eye_offset_x + move_x, base_center_y + eye_offset_y + move_y
-        r = int(self.settings.get('eye_radius', EYE_RADIUS))
+        r = max(0, int(EYE_RADIUS * eye_size_percent / 100.0))
         self.canvas.coords(self.eye_left_id, lx-r, ly-r, lx+r, ly+r)
         self.canvas.coords(self.eye_right_id, rx-r, ry-r, rx+r, ry+r)
 
@@ -2101,6 +2481,9 @@ class HijikimameApp:
 
         char_center_x = self.x + self.image_width // 2 + self._get_center_offset()[0]
         char_center_y = self.y + self.image_height // 2 + self._get_center_offset()[1]
+        if target_mode == 2 and self._target_image_lost and self.target_position is not None:
+            target_x, target_y = char_center_x, char_center_y
+            self.vx = 0; self.vy = 0
         dx_char = target_x - char_center_x; dy_char = target_y - char_center_y
         distance = math.hypot(dx_char, dy_char)
         touch_margin = max(16, min(self.image_width, self.image_height) // 6)
