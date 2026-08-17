@@ -112,7 +112,7 @@ TAKOYAKI_IMAGE_PATH = "takoyaki.png"
 # --- 目の描画に関する設定 ---
 EYE_RADIUS = 3      
 EYE_OFFSET_X = 10   
-EYE_OFFSET_Y = 3   
+EYE_OFFSET_Y = 2   
 CENTER_OFFSET_X = 0
 CENTER_OFFSET_Y = 0
 EYE_MOVEMENT_LIMIT = 4 
