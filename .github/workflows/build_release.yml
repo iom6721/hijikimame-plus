@@ -56,8 +56,7 @@ jobs:
             Release ${{ github.ref_name }}
 
 
-            + 画像追尾機能の修正
-            + 設定のデフォルトの修正
+            + Yの目のオフセットを修正
           draft: false
           prerelease: false
           files: |

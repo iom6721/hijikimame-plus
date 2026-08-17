@@ -112,7 +112,7 @@ TAKOYAKI_IMAGE_PATH = "takoyaki.png"
 # --- 目の描画に関する設定 ---
 EYE_RADIUS = 3      
 EYE_OFFSET_X = 10   
-EYE_OFFSET_Y = 2   
+EYE_OFFSET_Y = -2   
 CENTER_OFFSET_X = 0
 CENTER_OFFSET_Y = 0
 EYE_MOVEMENT_LIMIT = 4 
@@ -122,7 +122,7 @@ DEFAULT_EYE_COLOR = 'black'
 INVERTED_EYE_COLOR = 'white'
 
 # アプリバージョン（リリースタグと一致させてください）
-VERSION = "v2.3.5"
+VERSION = "v2.3.6"
 
 DISCORD_CLIENT_ID = "1507453857456721951"
 DISCORD_ACTIVITY_STATE = "※これは完全な身内ネタアプリケーションです。"
