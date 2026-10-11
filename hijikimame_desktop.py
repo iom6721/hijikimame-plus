@@ -3,16 +3,13 @@ import sys
 if sys.platform.startswith('linux') and not os.environ.get('DISPLAY') and not os.environ.get('WAYLAND_DISPLAY') and not os.environ.get('QT_QPA_PLATFORM'):
     os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from PySide6 import QtCore, QtGui, QtWidgets
-from PIL import Image, ImageTk, ImageGrab, ImageChops, ImageDraw
+from PIL import Image, ImageGrab, ImageChops, ImageDraw
 import collections
 
 
 class _QtPhotoImage:
     def __init__(self, image):
         self.image = image.convert('RGBA') if hasattr(image, 'convert') else image
-
-
-ImageTk.PhotoImage = _QtPhotoImage
 
 
 class _QtCompatMessageBox:
@@ -836,7 +833,7 @@ class HijikimameApp:
         display_img = self._get_display_image(self.original_image)
         self.current_display_image = display_img
         self.image_width, self.image_height = display_img.size
-        self.tk_image = ImageTk.PhotoImage(display_img)
+        self.tk_image = _QtPhotoImage(display_img)
 
         screen_width = master.winfo_vrootwidth()
         screen_height = master.winfo_vrootheight()
@@ -1428,7 +1425,7 @@ class HijikimameApp:
                 self._apply_image_size(display_img)
             except:
                 pass
-            self.tk_image = ImageTk.PhotoImage(display_img)
+            self.tk_image = _QtPhotoImage(display_img)
             self.canvas.itemconfig(self.character_id, image=self.tk_image)
         try:
             self.canvas.itemconfig(self.eye_left_id, fill=new_eye_color)
@@ -1700,7 +1697,7 @@ class HijikimameApp:
                 self._apply_image_size(display_img)
             except:
                 pass
-            self.tk_image = ImageTk.PhotoImage(display_img)
+            self.tk_image = _QtPhotoImage(display_img)
             self.canvas.itemconfig(self.character_id, image=self.tk_image)
         try:
             self.canvas.itemconfig(self.eye_left_id, fill=new_eye_color)
@@ -1755,7 +1752,7 @@ class HijikimameApp:
                     frame.putdata(newdata)
                 except:
                     pass
-                frames.append(ImageTk.PhotoImage(frame))
+                frames.append(_QtPhotoImage(frame))
             return frames
         except Exception:
             return []
@@ -1783,7 +1780,7 @@ class HijikimameApp:
                     pass
                 # scale frame according to character scale before creating PhotoImage
                 im_disp = self._get_display_image(im)
-                photo = ImageTk.PhotoImage(im_disp)
+                photo = _QtPhotoImage(im_disp)
                 self.nijiki_cache[i] = photo
             except:
                 pass
@@ -3353,7 +3350,7 @@ class HijikimameApp:
         self.canvas.itemconfigure(self.eye_right_id, state='hidden')
         # prepare a fully transparent final frame to avoid residual-pixel artifacts
         try:
-            self._transparent_frame = ImageTk.PhotoImage(Image.new('RGBA', (self.image_width, self.image_height), (0,0,0,0)))
+            self._transparent_frame = _QtPhotoImage(Image.new('RGBA', (self.image_width, self.image_height), (0,0,0,0)))
         except Exception:
             self._transparent_frame = None
         self.play_exit_frame()
