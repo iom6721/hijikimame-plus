@@ -2,3 +2,4 @@ pypresence
 pyinstaller
 opencv-python
 numpy
+PySide6

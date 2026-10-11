@@ -1,7 +1,404 @@
-import tkinter as tk
-from tkinter import messagebox, filedialog
+import os
+if not os.environ.get('DISPLAY') and not os.environ.get('WAYLAND_DISPLAY') and not os.environ.get('QT_QPA_PLATFORM'):
+    os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+from PySide6 import QtCore, QtGui, QtWidgets
 from PIL import Image, ImageTk, ImageGrab, ImageChops, ImageDraw
 import collections
+
+
+class _QtPhotoImage:
+    def __init__(self, image):
+        self.image = image.convert('RGBA') if hasattr(image, 'convert') else image
+
+
+ImageTk.PhotoImage = _QtPhotoImage
+
+
+class _QtCompatMessageBox:
+    @staticmethod
+    def showinfo(title, message):
+        QtWidgets.QMessageBox.information(None, title, message)
+
+    @staticmethod
+    def showerror(title, message):
+        QtWidgets.QMessageBox.critical(None, title, message)
+
+    @staticmethod
+    def showwarning(title, message):
+        QtWidgets.QMessageBox.warning(None, title, message)
+
+
+class _QtCompatFileDialog:
+    @staticmethod
+    def askopenfilename(parent=None, title='', filetypes=None, defaultextension=None):
+        if filetypes is None:
+            filetypes = [('All files', '*')]
+        filters = ';;'.join(f"{label} ({' '.join(patterns.split(';'))})" for label, patterns in filetypes)
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(parent or QtWidgets.QApplication.activeWindow(), title, '', filters)
+        return path
+
+    @staticmethod
+    def asksaveasfilename(parent=None, title='', filetypes=None, defaultextension=None):
+        if filetypes is None:
+            filetypes = [('All files', '*')]
+        filters = ';;'.join(f"{label} ({' '.join(patterns.split(';'))})" for label, patterns in filetypes)
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(parent or QtWidgets.QApplication.activeWindow(), title, '', filters)
+        return path
+
+
+class _QtCanvas(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._items = {}
+        self._next_id = 1
+        self._mouse_handlers = {}
+        self._layout = None
+
+    def pack(self):
+        return None
+
+    def bind(self, sequence, callback):
+        self._mouse_handlers[sequence] = callback
+
+    def create_image(self, x, y, image=None):
+        item_id = self._next_id
+        self._next_id += 1
+        self._items[item_id] = {'type': 'image', 'x': x, 'y': y, 'image': image, 'state': 'normal'}
+        self.update()
+        return item_id
+
+    def create_oval(self, x1, y1, x2, y2, fill=None, tag=None):
+        item_id = self._next_id
+        self._next_id += 1
+        self._items[item_id] = {'type': 'oval', 'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'fill': fill, 'tag': tag, 'state': 'normal'}
+        self.update()
+        return item_id
+
+    def itemconfig(self, item_id, **kwargs):
+        self.itemconfigure(item_id, **kwargs)
+
+    def itemconfigure(self, item_id, **kwargs):
+        if item_id not in self._items:
+            return
+        item = self._items[item_id]
+        if 'image' in kwargs:
+            image = kwargs['image']
+            if hasattr(image, 'image'):
+                image = image.image
+            item['image'] = image
+        if 'fill' in kwargs:
+            item['fill'] = kwargs['fill']
+        if 'state' in kwargs:
+            item['state'] = kwargs['state']
+        self.update()
+
+    def itemcget(self, item_id, key):
+        if item_id not in self._items:
+            return ''
+        return self._items[item_id].get(key, '')
+
+    def coords(self, item_id, *coords):
+        if item_id not in self._items:
+            return
+        item = self._items[item_id]
+        if len(coords) == 4:
+            item['x1'], item['y1'], item['x2'], item['y2'] = coords
+        self.update()
+
+    def delete(self, item_id):
+        self._items.pop(item_id, None)
+        self.update()
+
+    def find_all(self):
+        return list(self._items.keys())
+
+    def find_overlapping(self, x1, y1, x2, y2):
+        return [item_id for item_id, item in self._items.items() if item.get('state', 'normal') == 'normal' and self._overlaps(item, x1, y1, x2, y2)]
+
+    def _overlaps(self, item, x1, y1, x2, y2):
+        if item['type'] == 'oval':
+            return not (item['x2'] < x1 or item['x1'] > x2 or item['y2'] < y1 or item['y1'] > y2)
+        if item['type'] == 'image':
+            return not (item['x'] < x1 or item['x'] > x2 or item['y'] < y1 or item['y'] > y2)
+        return False
+
+    def tag_raise(self, item_id):
+        return None
+
+    def mousePressEvent(self, event):
+        callback = self._mouse_handlers.get('<Button-1>') if event.button() == QtCore.Qt.LeftButton else None
+        if callback is not None:
+            callback(_QtEventShim(event))
+
+    def mouseReleaseEvent(self, event):
+        callback = self._mouse_handlers.get('<ButtonRelease-1>') if event.button() == QtCore.Qt.LeftButton else None
+        if callback is not None:
+            callback(_QtEventShim(event))
+
+    def contextMenuEvent(self, event):
+        callback = self._mouse_handlers.get('<Button-3>')
+        if callback is not None:
+            callback(_QtEventShim(event))
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        for item_id, item in self._items.items():
+            if item.get('state') == 'hidden':
+                continue
+            if item['type'] == 'image':
+                image = item.get('image')
+                if image is None:
+                    continue
+                try:
+                    pil_img = image
+                    if hasattr(pil_img, 'image'):
+                        pil_img = pil_img.image
+                    pil_img = pil_img.convert('RGBA')
+                    qimage = QtGui.QImage(pil_img.tobytes('raw', 'RGBA'), pil_img.width, pil_img.height, QtGui.QImage.Format_RGBA8888)
+                    pixmap = QtGui.QPixmap.fromImage(qimage)
+                    painter.drawPixmap(int(item['x'] - pixmap.width() / 2), int(item['y'] - pixmap.height() / 2), pixmap)
+                except Exception:
+                    continue
+            elif item['type'] == 'oval':
+                color = QtGui.QColor(item.get('fill') or '#000000')
+                painter.setBrush(color)
+                painter.setPen(QtCore.Qt.NoPen)
+                painter.drawEllipse(int(item['x1']), int(item['y1']), int(item['x2'] - item['x1']), int(item['y2'] - item['y1']))
+        painter.end()
+
+
+class _QtEventShim:
+    def __init__(self, event):
+        self.event = event
+        self.x = event.pos().x()
+        self.y = event.pos().y()
+        self.x_root = event.globalPos().x()
+        self.y_root = event.globalPos().y()
+
+
+class _QtLabel(QtWidgets.QLabel):
+    def __init__(self, parent=None, text=''):
+        super().__init__(parent)
+        self._callback = None
+        self.setText(text)
+
+    def config(self, **kwargs):
+        if 'text' in kwargs:
+            self.setText(str(kwargs['text']))
+        if 'bg' in kwargs:
+            self.setStyleSheet(f'background-color: {kwargs["bg"]}; color: white;')
+        if 'fg' in kwargs:
+            self.setStyleSheet(f'color: {kwargs["fg"]};')
+        if 'font' in kwargs:
+            self.setFont(QtGui.QFont(kwargs['font'][0], kwargs['font'][1] if len(kwargs['font']) > 1 else 10))
+
+    def place(self, relx=None, rely=None, anchor='center'):
+        if self.parent() is None:
+            return
+        if relx is None:
+            relx = 0.5
+        if rely is None:
+            rely = 0.5
+        parent_width = self.parent().width()
+        parent_height = self.parent().height()
+        x = int(relx * parent_width)
+        y = int(rely * parent_height)
+        self.move(x, y)
+
+    def bind(self, sequence, callback):
+        self._callback = callback
+
+    def mousePressEvent(self, event):
+        if self._callback is not None:
+            self._callback(_QtEventShim(event))
+
+    def pack_forget(self):
+        self.hide()
+
+
+class _QtTopLevel(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._callbacks = {}
+        self._label = _QtLabel(self)
+        self._label.setAlignment(QtCore.Qt.AlignCenter)
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        self.show()
+
+    def overrridedirect(self, value):
+        return None
+
+    def overrideredirect(self, value):
+        return None
+
+    def attributes(self, name, value=None):
+        if name == '-alpha':
+            self.setWindowOpacity(float(value))
+        return None
+
+    def configure(self, **kwargs):
+        if 'bg' in kwargs:
+            self.setStyleSheet(f'background-color: {kwargs["bg"]};')
+
+    def bind(self, sequence, callback):
+        self._callbacks[sequence] = callback
+        if sequence == '<Escape>':
+            shortcut = QtGui.QShortcut(QtGui.QKeySequence('Esc'), self)
+            shortcut.activated.connect(callback)
+        elif sequence in ('<Button-1>', '<Button-3>'):
+            self._click_handler = callback
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton and getattr(self, '_click_handler', None):
+            self._click_handler(_QtEventShim(event))
+
+    def focus_force(self):
+        self.raise_()
+        self.activateWindow()
+    def destroy(self):
+        self.close()
+
+    def winfo_exists(self):
+        return self.isVisible()
+
+    def place(self, relx=None, rely=None, anchor='center'):
+        self._label.place(relx, rely, anchor)
+
+
+class _PySideRoot(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__()
+        self._callbacks = {}
+        self._canvas = _QtCanvas(self)
+        self._canvas.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, False)
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+
+    def title(self, value):
+        self.setWindowTitle(value)
+
+    def iconbitmap(self, path):
+        if os.path.exists(path):
+            self.setWindowIcon(QtGui.QIcon(path))
+
+    def overrideredirect(self, value):
+        return None
+
+    def wm_attributes(self, key, value=None):
+        if key == '-transparentcolor':
+            return None
+        if key == '-topmost':
+            self.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, bool(value))
+            self.show()
+            return None
+        if key == '-alpha':
+            self.setWindowOpacity(float(value))
+            return None
+        return None
+
+    def geometry(self, value):
+        value = value.strip()
+        if 'x' in value and '+' in value:
+            left, x, y = value.split('+', 2)
+            width, height = left.split('x', 1)
+            self.setGeometry(int(x), int(y), int(width), int(height))
+        elif value.startswith('+'):
+            _, x, y = value.split('+', 2)
+            self.move(int(x), int(y))
+        else:
+            self.resize(*[int(v) for v in value.split('x')[:2]])
+
+    def bind(self, sequence, callback):
+        self._callbacks[sequence] = callback
+        if sequence.startswith('<Control-'):
+            key = sequence.replace('<Control-', '').replace('>', '')
+            key_text = key.upper() if len(key) == 1 else key
+            shortcut = QtGui.QShortcut(QtGui.QKeySequence(f'Ctrl+{key_text}'), self)
+            shortcut.activated.connect(callback)
+
+    def after(self, ms, callback):
+        QtCore.QTimer.singleShot(ms, callback)
+
+    def destroy(self):
+        self.close()
+
+    def update(self):
+        super().update()
+        self._canvas.update()
+
+    def winfo_vrootwidth(self):
+        return QtWidgets.QApplication.primaryScreen().geometry().width()
+
+    def winfo_vrootheight(self):
+        return QtWidgets.QApplication.primaryScreen().geometry().height()
+
+    def winfo_pointerx(self):
+        return QtGui.QCursor.pos().x()
+
+    def winfo_pointery(self):
+        return QtGui.QCursor.pos().y()
+
+    def winfo_screenwidth(self):
+        return self.winfo_vrootwidth()
+
+    def winfo_screenheight(self):
+        return self.winfo_vrootheight()
+
+    def winfo_vrootx(self):
+        return 0
+
+    def winfo_vrooty(self):
+        return 0
+
+    def winfo_width(self):
+        return self.width()
+
+    def winfo_height(self):
+        return self.height()
+
+    def winfo_exists(self):
+        return not self.isHidden()
+
+    def mainloop(self):
+        QtWidgets.QApplication.instance().exec_()
+
+
+class _PySideTk:
+    @staticmethod
+    def _ensure_app():
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+        return app
+
+    @staticmethod
+    def Tk():
+        _PySideTk._ensure_app()
+        return _PySideRoot()
+
+    @staticmethod
+    def Toplevel(parent=None):
+        _PySideTk._ensure_app()
+        return _QtTopLevel(parent)
+
+    @staticmethod
+    def Label(parent=None, text=''):
+        _PySideTk._ensure_app()
+        return _QtLabel(parent, text)
+
+    @staticmethod
+    def Canvas(parent, **kwargs):
+        _PySideTk._ensure_app()
+        return _QtCanvas(parent)
+
+
+messagebox = _QtCompatMessageBox
+filedialog = _QtCompatFileDialog
+tk = _PySideTk()
 try:
     Image.MAX_IMAGE_PIXELS = None
 except:
@@ -1819,6 +2216,8 @@ class HijikimameApp:
 
     # --- 編集ウィンドウ ---
     def open_edit_window(self, event=None):
+        if isinstance(self.master, _PySideRoot):
+            return
         try:
             if hasattr(self, '_edit_win') and self._edit_win.winfo_exists():
                 self._edit_win.lift()
