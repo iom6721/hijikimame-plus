@@ -5,7 +5,14 @@ a = Analysis(
     ['hijikimame_desktop.py'],
     pathex=[],
     binaries=[],
-    datas=[('hijikimame_body.png', '.'), ('takoyaki.png', '.'), ('exit_animation.gif', '.'), ('nijiki', 'nijiki')],
+    datas=[
+        ('hijikimame_body.png', '.'),
+        ('takoyaki.png', '.'),
+        ('3.png', '.'),
+        ('exit_animation.gif', '.'),
+        ('hijikimame_desktop.ico', '.'),
+        ('nijiki', 'nijiki'),
+    ],
     hiddenimports=[
         'pypresence',
         'pypresence.baseclient',

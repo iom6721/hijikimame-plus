@@ -1,5 +1,6 @@
 import os
-if not os.environ.get('DISPLAY') and not os.environ.get('WAYLAND_DISPLAY') and not os.environ.get('QT_QPA_PLATFORM'):
+import sys
+if sys.platform.startswith('linux') and not os.environ.get('DISPLAY') and not os.environ.get('WAYLAND_DISPLAY') and not os.environ.get('QT_QPA_PLATFORM'):
     os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from PySide6 import QtCore, QtGui, QtWidgets
 from PIL import Image, ImageTk, ImageGrab, ImageChops, ImageDraw
@@ -55,10 +56,16 @@ class _QtCanvas(QtWidgets.QWidget):
         self._layout = None
 
     def pack(self):
-        return None
+        parent = self.parentWidget()
+        if parent is not None:
+            self.setGeometry(parent.rect())
+        self.show()
 
     def bind(self, sequence, callback):
         self._mouse_handlers[sequence] = callback
+
+    def unbind(self, sequence):
+        self._mouse_handlers.pop(sequence, None)
 
     def create_image(self, x, y, image=None):
         item_id = self._next_id
@@ -135,6 +142,11 @@ class _QtCanvas(QtWidgets.QWidget):
         if callback is not None:
             callback(_QtEventShim(event))
 
+    def mouseMoveEvent(self, event):
+        callback = self._mouse_handlers.get('<B1-Motion>')
+        if callback is not None:
+            callback(_QtEventShim(event))
+
     def contextMenuEvent(self, event):
         callback = self._mouse_handlers.get('<Button-3>')
         if callback is not None:
@@ -173,8 +185,14 @@ class _QtEventShim:
         self.event = event
         self.x = event.pos().x()
         self.y = event.pos().y()
-        self.x_root = event.globalPos().x()
-        self.y_root = event.globalPos().y()
+        global_position = event.globalPosition().toPoint() if hasattr(event, 'globalPosition') else event.globalPos()
+        self.x_root = global_position.x()
+        self.y_root = global_position.y()
+        if event.type() == QtCore.QEvent.MouseButtonPress or event.type() == QtCore.QEvent.MouseButtonRelease:
+            button = event.button()
+            self.num = 1 if button == QtCore.Qt.LeftButton else 3 if button == QtCore.Qt.RightButton else 2
+        else:
+            self.num = 0
 
 
 class _QtLabel(QtWidgets.QLabel):
@@ -364,7 +382,12 @@ class _PySideRoot(QtWidgets.QWidget):
         return not self.isHidden()
 
     def mainloop(self):
-        QtWidgets.QApplication.instance().exec_()
+        QtWidgets.QApplication.instance().exec()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, '_canvas'):
+            self._canvas.setGeometry(self.rect())
 
 
 class _PySideTk:
@@ -458,8 +481,24 @@ def resource_path(relative_path):
     try:
         base_path = sys._MEIPASS
     except Exception:
-        base_path = os.path.abspath(".")
+        base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
+
+
+def settings_path():
+    if not getattr(sys, 'frozen', False):
+        return resource_path(SETTINGS_FILE)
+
+    data_root = os.environ.get('LOCALAPPDATA') or os.path.join(os.path.expanduser('~'), 'AppData', 'Local')
+    settings_dir = os.path.join(data_root, 'HijikimamePlus')
+    os.makedirs(settings_dir, exist_ok=True)
+    path = os.path.join(settings_dir, SETTINGS_FILE)
+
+    legacy_path = os.path.join(os.path.dirname(sys.executable), SETTINGS_FILE)
+    if not os.path.exists(path) and os.path.isfile(legacy_path):
+        shutil.copy2(legacy_path, path)
+    return path
+
 
 if os.environ.get('HIJIKI_EMBEDDED_RUNNING') != '1':
     for _a in list(sys.argv[1:]):
@@ -723,6 +762,7 @@ class HijikimameApp:
             'image_tracking_min_match_score': 0.6,
             'eye_movement_limit': EYE_MOVEMENT_LIMIT,
             'image_tracking_interval': 1.0,
+            'discord_presence_enabled': True,
         }
 
         try:
@@ -788,6 +828,7 @@ class HijikimameApp:
         self.extra_image = self.load_image(self.extra_image_path)
         
         if self.original_image is None:
+            messagebox.showerror("起動失敗", f"キャラクター画像を読み込めませんでした:\n{self.original_image_path}")
             master.destroy()
             return
             
@@ -873,14 +914,13 @@ class HijikimameApp:
         self._discord_presence_retry_scheduled = False
         self.master.after(500, self.start_update_check_thread)
         self.master.after(1000, self._cleanup_update_file)
-        try:
+        if self.settings.get('discord_presence_enabled', True):
             self.start_discord_presence()
-        except:
-            pass
         try:
             self.master.after(200, lambda: self.open_edit_window())
         except:
             pass
+        self.master.show()
 
     def _show_update_dialog(self, title, text):
         try:
@@ -1247,6 +1287,10 @@ class HijikimameApp:
             return
 
     def start_discord_presence(self):
+        if not self.settings.get('discord_presence_enabled', True):
+            self._disconnect_discord_presence()
+            self._discord_presence_retry_scheduled = False
+            return
         if Presence is None:
             error_text = 'pypresence module unavailable'
             if pypresence_import_error:
@@ -1293,6 +1337,7 @@ class HijikimameApp:
             pass
 
     def _disconnect_discord_presence(self):
+        self._discord_presence_retry_scheduled = False
         if not getattr(self, 'discord_presence', None):
             return
         try:
@@ -1300,6 +1345,15 @@ class HijikimameApp:
         except Exception:
             pass
         self.discord_presence = None
+
+    def set_discord_presence_enabled(self, enabled):
+        enabled = bool(enabled)
+        self.settings['discord_presence_enabled'] = enabled
+        self.save_settings_file()
+        if enabled:
+            self.start_discord_presence()
+        else:
+            self._disconnect_discord_presence()
 
     def _apply_mode(self, mode):
         if self.is_exiting:
@@ -1387,6 +1441,15 @@ class HijikimameApp:
 
     def close_all_instances(self):
         """IPC経由で全てのインスタンスに終了コマンドを送り、自身も終了アニメを開始する"""
+        edit_window = getattr(self, '_edit_win', None)
+        if edit_window is not None:
+            try:
+                if isinstance(edit_window, QtWidgets.QWidget):
+                    edit_window.close()
+                else:
+                    edit_window.destroy()
+            except RuntimeError:
+                pass
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(0.5)
@@ -1759,16 +1822,26 @@ class HijikimameApp:
     def _update_target_status_labels(self):
         try:
             if hasattr(self, '_target_mode_label'):
-                self._target_mode_label.config(text=self._get_tracking_target_mode_display())
+                label = self._target_mode_label
+                if isinstance(label, QtWidgets.QLabel):
+                    label.setText(self._get_tracking_target_mode_display())
+                else:
+                    label.config(text=self._get_tracking_target_mode_display())
             if hasattr(self, '_target_status_label'):
-                self._target_status_label.config(text=self._get_target_status_text())
+                label = self._target_status_label
+                if isinstance(label, QtWidgets.QLabel):
+                    label.setText(self._get_target_status_text())
+                else:
+                    label.config(text=self._get_target_status_text())
         except:
             pass
 
     def _refresh_character_buttons(self):
         try:
             for mi, btn in getattr(self, '_character_buttons', {}).items():
-                if mi == self.current_mode:
+                if isinstance(btn, QtWidgets.QAbstractButton):
+                    btn.setChecked(mi == self.current_mode)
+                elif mi == self.current_mode:
                     btn.config(relief='sunken', bg='#d0f0c0')
                 else:
                     btn.config(relief='raised', bg='SystemButtonFace')
@@ -2217,6 +2290,7 @@ class HijikimameApp:
     # --- 編集ウィンドウ ---
     def open_edit_window(self, event=None):
         if isinstance(self.master, _PySideRoot):
+            self._open_qt_edit_window()
             return
         try:
             if hasattr(self, '_edit_win') and self._edit_win.winfo_exists():
@@ -2565,6 +2639,260 @@ class HijikimameApp:
 
         self.master.after(1500, self._poll_settings_file)
 
+    def _open_qt_edit_window(self):
+        if getattr(self, '_edit_win', None) is not None:
+            try:
+                if self._edit_win.isVisible():
+                    self._edit_win.raise_()
+                    self._edit_win.activateWindow()
+                    return
+            except RuntimeError:
+                pass
+
+        dialog = QtWidgets.QDialog()
+        dialog.setWindowTitle("ひじき豆 - settings")
+        dialog.setWindowIcon(QtGui.QIcon(resource_path('hijikimame_desktop.ico')))
+        dialog.setWindowFlags(
+            QtCore.Qt.Window
+            | QtCore.Qt.WindowTitleHint
+            | QtCore.Qt.WindowSystemMenuHint
+            | QtCore.Qt.WindowMinimizeButtonHint
+            | QtCore.Qt.WindowMaximizeButtonHint
+            | QtCore.Qt.WindowCloseButtonHint
+        )
+        dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        dialog.resize(1100, 750)
+        dialog.setMinimumSize(900, 600)
+        self._edit_win = dialog
+
+        outer = QtWidgets.QVBoxLayout(dialog)
+        actions = QtWidgets.QHBoxLayout()
+        outer.addLayout(actions)
+        for title, callback in (
+            ("キャラ切替", self.toggle_mode),
+            ("場所選択", self.request_target_position_selection),
+            ("画像追跡設定", self.choose_target_image),
+            ("追尾解除", self.clear_target_tracking),
+        ):
+            button = QtWidgets.QPushButton(title)
+            button.clicked.connect(callback)
+            actions.addWidget(button)
+
+        file_actions = QtWidgets.QHBoxLayout()
+        outer.addLayout(file_actions)
+        for title, callback in (("設定読込", self.import_settings_from_file),
+                                ("設定出力", self.export_settings_to_file)):
+            button = QtWidgets.QPushButton(title)
+            button.clicked.connect(callback)
+            file_actions.addWidget(button)
+
+        self._target_mode_label = QtWidgets.QLabel(self._get_tracking_target_mode_display())
+        self._target_status_label = QtWidgets.QLabel(self._get_target_status_text())
+        outer.addWidget(self._target_mode_label)
+        outer.addWidget(self._target_status_label)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        outer.addWidget(scroll, 1)
+        content = QtWidgets.QWidget()
+        scroll.setWidget(content)
+        layout = QtWidgets.QGridLayout(content)
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 2)
+        left_column = QtWidgets.QVBoxLayout()
+        layout.addLayout(left_column, 0, 0)
+
+        character_group = QtWidgets.QGroupBox("キャラクター選択")
+        character_layout = QtWidgets.QVBoxLayout(character_group)
+        self._character_buttons = {}
+        mode_names = (
+            "1. ひじき豆",
+            "2. ろず",
+            "3. たこ焼き",
+            "4. 虹き豆",
+            "5. オーバーローダーひじき豆",
+        )
+        for mode, name in enumerate(mode_names):
+            button = QtWidgets.QPushButton(name)
+            button.setCheckable(True)
+            button.clicked.connect(lambda checked=False, m=mode: self.set_mode(m))
+            character_layout.addWidget(button)
+            self._character_buttons[mode] = button
+        left_column.addWidget(character_group)
+
+        custom_group = QtWidgets.QGroupBox("カスタムコスメティック")
+        custom_layout = QtWidgets.QVBoxLayout(custom_group)
+        cosmetic_list = QtWidgets.QListWidget()
+        cosmetic_list.addItems(self.settings.get('custom_cosmetics', []))
+        custom_layout.addWidget(cosmetic_list)
+        cosmetic_actions = QtWidgets.QHBoxLayout()
+        custom_layout.addLayout(cosmetic_actions)
+
+        def add_cosmetic():
+            if self.settings.get('show_cosmetic_warning', True):
+                QtWidgets.QMessageBox.information(dialog, "コスメティック追加の注意", CUSTOM_COSMETIC_WARNING)
+            filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+                dialog, "コスメティック画像を選択", "",
+                "Image files (*.png *.jpg *.jpeg *.bmp *.gif);;All files (*)")
+            if not filename:
+                return
+            image = self.load_image(filename)
+            copied_name = self._copy_cosmetic_file(filename) if image is not None else None
+            if copied_name is None:
+                QtWidgets.QMessageBox.critical(dialog, "追加失敗", "画像を読み込むか保存できませんでした。")
+                return
+            if copied_name not in self.settings.setdefault('custom_cosmetics', []):
+                self.settings['custom_cosmetics'].append(copied_name)
+            cosmetic_list.addItem(copied_name)
+            self.save_settings_file()
+
+        def apply_cosmetic():
+            row = cosmetic_list.currentRow()
+            if row >= 0:
+                self.set_mode(5 + row)
+
+        def remove_cosmetic():
+            row = cosmetic_list.currentRow()
+            if row < 0:
+                return
+            name = cosmetic_list.item(row).text()
+            cosmetic_list.takeItem(row)
+            self.settings['custom_cosmetics'].remove(name)
+            if self.current_mode >= 5 and self.current_mode - 5 >= len(self.settings['custom_cosmetics']):
+                self.set_mode(0)
+            self.save_settings_file()
+
+        for title, callback in (("追加", add_cosmetic), ("適用", apply_cosmetic), ("削除", remove_cosmetic)):
+            button = QtWidgets.QPushButton(title)
+            button.clicked.connect(callback)
+            cosmetic_actions.addWidget(button)
+        left_column.addWidget(custom_group)
+        left_column.addStretch(1)
+
+        settings_group = QtWidgets.QGroupBox("設定")
+        settings_layout = QtWidgets.QGridLayout(settings_group)
+        layout.addWidget(settings_group, 0, 1)
+        checkboxes = {}
+        checkbox_specs = (
+            ('mouse_repulsion_enabled', "ひじき豆の反発", True),
+            ('show_cosmetic_warning', "コスメ追加時の警告を表示する", True),
+            ('image_tracking_force_fullscreen', "軽量化: 全画面追尾を常に行う", False),
+            ('discord_presence_enabled', "Discord連携を有効にする", True),
+        )
+        for row, (key, title, default) in enumerate(checkbox_specs):
+            checkbox = QtWidgets.QCheckBox(title)
+            checkbox.setChecked(bool(self.settings.get(key, default)))
+            checkboxes[key] = checkbox
+            settings_layout.addWidget(checkbox, row, 0, 1, 4)
+            if key == 'discord_presence_enabled':
+                checkbox.toggled.connect(self.set_discord_presence_enabled)
+
+        boundary = QtWidgets.QComboBox()
+        boundary.addItems(['bounce', 'stop', 'destroy'])
+        boundary.setCurrentText(self.settings.get('screen_boundary_mode', 'bounce'))
+        settings_layout.addWidget(QtWidgets.QLabel("画面端の挙動:"), len(checkbox_specs), 0)
+        settings_layout.addWidget(boundary, len(checkbox_specs), 1)
+
+        control_specs = (
+            ('eye_offset_x', '目のオフセット X', -80, 80, 1, EYE_OFFSET_X),
+            ('eye_offset_y', '目のオフセット Y', -80, 80, 1, EYE_OFFSET_Y),
+            ('center_offset_x', 'キャラ中心オフセット X', -120, 120, 1, CENTER_OFFSET_X),
+            ('center_offset_y', 'キャラ中心オフセット Y', -120, 120, 1, CENTER_OFFSET_Y),
+            ('character_scale', 'キャラの大きさ (%)', 0, 200, 1, 100.0),
+            ('eye_radius', '目の大きさ (%)', 0, 200, 1, 100.0),
+            ('eye_movement_limit', '目の動く範囲', 0, 20, 1, EYE_MOVEMENT_LIMIT),
+            ('tracking_speed', '追尾速度', 0, 0.1, 0.001, TRACKING_SPEED),
+            ('throw_speed_multiplier', '投げ速度倍率', 0.1, 10, 0.1, 2.5),
+            ('max_throw_multiplier', '投げ最大倍率', 1, 50, 1, 10),
+            ('image_tracking_interval', '画像追尾間隔 (秒)', 0, 2, 0.1, 1.0),
+            ('image_tracking_min_match_score', '追尾受理最低スコア', 0, 1, 0.01, 0.6),
+            ('edge_bounce_count', '画面端バウンド回数', 0, 20, 1, EDGE_BOUNCE_COUNT_DEFAULT),
+            ('edge_bounce_strength', 'バウンド強さ', 0, 1.5, 0.05, EDGE_BOUNCE_STRENGTH),
+            ('nijiki_fps', '虹き豆 再生速度 (FPS)', 1, 60, 1, NIJIKI_DEFAULT_FPS),
+        )
+        controls = {}
+        settings_row_offset = len(checkbox_specs) + 1
+        for index, (key, title, minimum, maximum, step, default) in enumerate(control_specs):
+            control = QtWidgets.QDoubleSpinBox()
+            control.setRange(minimum, maximum)
+            control.setSingleStep(step)
+            control.setDecimals(3 if step < 0.01 else (2 if step < 1 else 0))
+            value = float(self.settings.get(key, default))
+            if key in ('eye_offset_y', 'center_offset_y'):
+                value = -value
+            control.setValue(value)
+            controls[key] = control
+            row = settings_row_offset + index // 2
+            column = (index % 2) * 2
+            settings_layout.addWidget(QtWidgets.QLabel(title + ":"), row, column)
+            settings_layout.addWidget(control, row, column + 1)
+
+        def apply_qt_settings():
+            for key, control in controls.items():
+                value = control.value()
+                if key in ('eye_offset_y', 'center_offset_y'):
+                    value = -value
+                if key in ('eye_offset_x', 'eye_offset_y', 'center_offset_x',
+                           'center_offset_y', 'edge_bounce_count', 'nijiki_fps'):
+                    value = int(value)
+                self.settings[key] = value
+            for key, checkbox in checkboxes.items():
+                self.settings[key] = checkbox.isChecked()
+            self.settings['screen_boundary_mode'] = boundary.currentText()
+            self.remaining_bounces = self.settings['edge_bounce_count']
+            self.save_settings_file()
+            self.set_mode(self.current_mode, save=False)
+            self._update_eye_positions()
+            self.broadcast_settings()
+
+        buttons = QtWidgets.QHBoxLayout()
+        outer.addLayout(buttons)
+        reset_button = QtWidgets.QPushButton("初期化")
+
+        def reset_qt_settings():
+            defaults = {
+                'eye_offset_x': EYE_OFFSET_X, 'eye_offset_y': EYE_OFFSET_Y,
+                'center_offset_x': CENTER_OFFSET_X, 'center_offset_y': CENTER_OFFSET_Y,
+                'character_scale': 100.0, 'eye_radius': 100.0,
+                'eye_movement_limit': EYE_MOVEMENT_LIMIT, 'tracking_speed': TRACKING_SPEED,
+                'throw_speed_multiplier': 2.5, 'max_throw_multiplier': 10,
+                'image_tracking_interval': 1.0, 'image_tracking_min_match_score': 0.6,
+                'edge_bounce_count': EDGE_BOUNCE_COUNT_DEFAULT,
+                'edge_bounce_strength': EDGE_BOUNCE_STRENGTH, 'nijiki_fps': NIJIKI_DEFAULT_FPS,
+            }
+            for key, value in defaults.items():
+                controls[key].setValue(-value if key in ('eye_offset_y', 'center_offset_y') else value)
+            for key, value in (('mouse_repulsion_enabled', True),
+                               ('show_cosmetic_warning', True),
+                               ('image_tracking_force_fullscreen', False),
+                               ('discord_presence_enabled', True)):
+                checkboxes[key].setChecked(value)
+            boundary.setCurrentText('bounce')
+            self.set_mode(0, save=False)
+            apply_qt_settings()
+
+        reset_button.clicked.connect(reset_qt_settings)
+        buttons.addWidget(reset_button)
+        close_button = QtWidgets.QPushButton("閉じる")
+        close_button.clicked.connect(dialog.close)
+        buttons.addWidget(close_button)
+        close_all_button = QtWidgets.QPushButton("全て閉じる")
+        close_all_button.clicked.connect(self.close_all_instances)
+        buttons.addWidget(close_all_button)
+        if self._update_available:
+            update_button = QtWidgets.QPushButton("最新バージョンに揃える")
+            update_button.clicked.connect(self._perform_update)
+            buttons.addWidget(update_button)
+        buttons.addStretch(1)
+        apply_button = QtWidgets.QPushButton("適用")
+        apply_button.clicked.connect(apply_qt_settings)
+        buttons.addWidget(apply_button)
+
+        self._refresh_character_buttons()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     def broadcast_settings(self):
         try:
             data = b'SETTINGS:' + json.dumps(self.settings).encode('utf-8')
@@ -2586,7 +2914,7 @@ class HijikimameApp:
 
     def _poll_settings_file(self):
         try:
-            p = resource_path(SETTINGS_FILE)
+            p = settings_path()
             if os.path.exists(p):
                 m = os.path.getmtime(p)
                 if getattr(self, '_settings_mtime', None) is None or m != self._settings_mtime:
@@ -2604,14 +2932,14 @@ class HijikimameApp:
             settings_to_save = dict(self.settings)
             if 'edit_enabled' in settings_to_save:
                 settings_to_save.pop('edit_enabled', None)
-            with open(resource_path(SETTINGS_FILE), 'w', encoding='utf-8') as f:
+            with open(settings_path(), 'w', encoding='utf-8') as f:
                 json.dump(settings_to_save, f, ensure_ascii=False, indent=2)
         except:
             pass
 
     def load_settings_file(self):
         try:
-            p = resource_path(SETTINGS_FILE)
+            p = settings_path()
             if os.path.exists(p):
                 with open(p, 'r', encoding='utf-8') as f:
                     return json.load(f)
@@ -2783,8 +3111,8 @@ class HijikimameApp:
     def start_drag_stop(self, event):
         if event.num == 1:
             self.is_dragging_stop = True; self.vx = 0; self.vy = 0; self.throw_cooldown = 0 
-            self.last_mouse_x = self.master.winfo_pointerx()
-            self.last_mouse_y = self.master.winfo_pointery()
+            self._last_drag_x = event.x_root
+            self._last_drag_y = event.y_root
             self.drag_vx = 0; self.drag_vy = 0
             self.canvas.bind("<B1-Motion>", self.do_move)
 
@@ -2807,11 +3135,12 @@ class HijikimameApp:
 
     def do_move(self, event):
         if self.is_dragging_stop:
-            current_x = self.master.winfo_pointerx()
-            current_y = self.master.winfo_pointery()
-            self.drag_vx = current_x - self.last_mouse_x
-            self.drag_vy = current_y - self.last_mouse_y
-            self.last_mouse_x = current_x; self.last_mouse_y = current_y
+            current_x = event.x_root
+            current_y = event.y_root
+            self.drag_vx = current_x - self._last_drag_x
+            self.drag_vy = current_y - self._last_drag_y
+            self._last_drag_x = current_x
+            self._last_drag_y = current_y
             self.update_eyes_only()
 
     def update_eyes_only(self):

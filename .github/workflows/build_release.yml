@@ -19,33 +19,29 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: |
-          python -m pip install -r requirements.txt
           python -m pip install --upgrade pip
-          pip install pyinstaller pillow requests
+          python -m pip install -r requirements.txt
 
       - name: Build EXE with PyInstaller
+        shell: pwsh
         run: |
-          pyinstaller --onefile --windowed --add-data "hijikimame_body.png;." --add-data "takoyaki.png;." --add-data "3.png;." --add-data "exit_animation.gif;." --add-data "nijiki;nijiki" --icon hijikimame_desktop.ico hijikimame_desktop.py
+          python -m PyInstaller --clean --noconfirm hijikimame_desktop.spec
+          if (-not (Test-Path "dist/hijikimame_desktop.exe")) {
+            throw "PyInstaller did not produce dist/hijikimame_desktop.exe"
+          }
 
       - name: Generate SHA256 for EXE
-        shell: bash
+        shell: pwsh
         run: |
-          python - <<'PY'
-          import hashlib
-          p = 'dist/hijikimame_desktop.exe'
-          h = hashlib.sha256()
-          with open(p, 'rb') as f:
-              for chunk in iter(lambda: f.read(8192), b''):
-                  h.update(chunk)
-          s = h.hexdigest()
-          with open('dist/hijikimame_desktop.exe.sha256', 'w') as out:
-              out.write(s + '  hijikimame_desktop.exe\n')
-          print(s)
-          PY
+          $hash = (Get-FileHash "dist/hijikimame_desktop.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -Path "dist/hijikimame_desktop.exe.sha256" -Value "$hash  hijikimame_desktop.exe" -NoNewline
+          Write-Host $hash
 
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v1
@@ -55,8 +51,8 @@ jobs:
           body: |
             Release ${{ github.ref_name }}
 
-
-            + Yの目のオフセットを修正
+            + UIをtinkerからpysideへ変更。
+            + Discord連携のON/OFFを切り替えできるように変更。
           draft: false
           prerelease: false
           files: |

@@ -3,3 +3,5 @@ pyinstaller
 opencv-python
 numpy
 PySide6
+Pillow
+requests
