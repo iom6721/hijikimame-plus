@@ -51,8 +51,7 @@ jobs:
           body: |
             Release ${{ github.ref_name }}
 
-            + UIをtinkerからpysideへ変更。
-            + Discord連携のON/OFFを切り替えできるように変更。
+            + 追尾機能がつかえないバグを修正
           draft: false
           prerelease: false
           files: |

@@ -201,10 +201,13 @@ class _QtLabel(QtWidgets.QLabel):
     def config(self, **kwargs):
         if 'text' in kwargs:
             self.setText(str(kwargs['text']))
+        styles = []
         if 'bg' in kwargs:
-            self.setStyleSheet(f'background-color: {kwargs["bg"]}; color: white;')
+            styles.append(f'background-color: {kwargs["bg"]}')
         if 'fg' in kwargs:
-            self.setStyleSheet(f'color: {kwargs["fg"]};')
+            styles.append(f'color: {kwargs["fg"]}')
+        if styles:
+            self.setStyleSheet('; '.join(styles))
         if 'font' in kwargs:
             self.setFont(QtGui.QFont(kwargs['font'][0], kwargs['font'][1] if len(kwargs['font']) > 1 else 10))
 
@@ -215,10 +218,11 @@ class _QtLabel(QtWidgets.QLabel):
             relx = 0.5
         if rely is None:
             rely = 0.5
+        self.adjustSize()
         parent_width = self.parent().width()
         parent_height = self.parent().height()
-        x = int(relx * parent_width)
-        y = int(rely * parent_height)
+        x = int(relx * parent_width - self.width() / 2) if anchor == 'center' else int(relx * parent_width)
+        y = int(rely * parent_height - self.height() / 2) if anchor == 'center' else int(rely * parent_height)
         self.move(x, y)
 
     def bind(self, sequence, callback):
@@ -238,7 +242,11 @@ class _QtTopLevel(QtWidgets.QWidget):
         self._callbacks = {}
         self._label = _QtLabel(self)
         self._label.setAlignment(QtCore.Qt.AlignCenter)
-        self.setWindowFlags(QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(
+            QtCore.Qt.Window
+            | QtCore.Qt.FramelessWindowHint
+            | QtCore.Qt.WindowStaysOnTopHint
+        )
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
         self.show()
@@ -256,6 +264,7 @@ class _QtTopLevel(QtWidgets.QWidget):
 
     def configure(self, **kwargs):
         if 'bg' in kwargs:
+            self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
             self.setStyleSheet(f'background-color: {kwargs["bg"]};')
 
     def bind(self, sequence, callback):
@@ -281,6 +290,39 @@ class _QtTopLevel(QtWidgets.QWidget):
 
     def place(self, relx=None, rely=None, anchor='center'):
         self._label.place(relx, rely, anchor)
+
+
+class _QtTargetSelectionOverlay(QtWidgets.QWidget):
+    def __init__(self, geometry, on_select, on_cancel):
+        super().__init__(None)
+        self._on_select = on_select
+        self._on_cancel = on_cancel
+        self.setWindowFlags(
+            QtCore.Qt.Window
+            | QtCore.Qt.FramelessWindowHint
+            | QtCore.Qt.WindowStaysOnTopHint
+        )
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self.setWindowOpacity(0.35)
+        self.setStyleSheet('background-color: #202020;')
+        self.setGeometry(geometry)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        label = QtWidgets.QLabel('追跡する場所をクリックしてください\nESCでキャンセル')
+        label.setAlignment(QtCore.Qt.AlignCenter)
+        label.setStyleSheet('color: white; background: transparent; font-size: 20px;')
+        label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        layout.addWidget(label)
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self._on_select(_QtEventShim(event))
+
+    def keyPressEvent(self, event):
+        if event.key() == QtCore.Qt.Key_Escape:
+            self._on_cancel()
+            return
+        super().keyPressEvent(event)
 
 
 class _PySideRoot(QtWidgets.QWidget):
@@ -406,9 +448,12 @@ class _PySideTk:
         return _QtTopLevel(parent)
 
     @staticmethod
-    def Label(parent=None, text=''):
+    def Label(parent=None, text='', **kwargs):
         _PySideTk._ensure_app()
-        return _QtLabel(parent, text)
+        label = _QtLabel(parent, text)
+        if kwargs:
+            label.config(**kwargs)
+        return label
 
     @staticmethod
     def Canvas(parent, **kwargs):
@@ -1847,27 +1892,49 @@ class HijikimameApp:
 
     def request_target_position_selection(self):
         try:
-            if hasattr(self, '_target_overlay') and self._target_overlay.winfo_exists():
-                return
+            overlay = getattr(self, '_target_overlay', None)
+            if overlay is not None:
+                try:
+                    if overlay.isVisible() if isinstance(overlay, QtWidgets.QWidget) else overlay.winfo_exists():
+                        return
+                except RuntimeError:
+                    self._target_overlay = None
         except:
             pass
         try:
-            screen_w = self.master.winfo_vrootwidth()
-            screen_h = self.master.winfo_vrootheight()
-            self._target_overlay = tk.Toplevel(self.master)
-            self._target_overlay.overrideredirect(True)
-            self._target_overlay.attributes('-alpha', 0.2)
-            self._target_overlay.attributes('-topmost', True)
-            self._target_overlay.geometry(f'{screen_w}x{screen_h}+0+0')
-            self._target_overlay.configure(bg='black')
-            label = tk.Label(self._target_overlay, text='追跡する場所をクリックしてください\nESCでキャンセル', bg='black', fg='white', font=('Arial', 18))
-            label.place(relx=0.5, rely=0.5, anchor='center')
-            self._target_overlay.bind('<Button-1>', self._on_target_position_selected)
-            label.bind('<Button-1>', self._on_target_position_selected)
-            self._target_overlay.bind('<Escape>', lambda e: self._cancel_target_position_selection())
-            self._target_overlay.focus_force()
-        except:
-            pass
+            if isinstance(self.master, _PySideRoot):
+                screens = QtWidgets.QApplication.screens()
+                screen_geometry = screens[0].geometry()
+                for screen in screens[1:]:
+                    screen_geometry = screen_geometry.united(screen.geometry())
+                self._target_overlay = _QtTargetSelectionOverlay(
+                    screen_geometry,
+                    self._on_target_position_selected,
+                    self._cancel_target_position_selection,
+                )
+                self._target_overlay.show()
+                self._target_overlay.raise_()
+                self._target_overlay.activateWindow()
+            else:
+                screen_w = self.master.winfo_vrootwidth()
+                screen_h = self.master.winfo_vrootheight()
+                self._target_overlay = tk.Toplevel(self.master)
+                self._target_overlay.overrideredirect(True)
+                self._target_overlay.attributes('-alpha', 0.2)
+                self._target_overlay.attributes('-topmost', True)
+                self._target_overlay.geometry(f'{screen_w}x{screen_h}+0+0')
+                self._target_overlay.configure(bg='black')
+                label = tk.Label(self._target_overlay, text='追跡する場所をクリックしてください\nESCでキャンセル', bg='black', fg='white', font=('Arial', 18))
+                label.place(relx=0.5, rely=0.5, anchor='center')
+                self._target_overlay.bind('<Button-1>', self._on_target_position_selected)
+                label.bind('<Button-1>', self._on_target_position_selected)
+                self._target_overlay.bind('<Escape>', lambda e: self._cancel_target_position_selection())
+                self._target_overlay.focus_force()
+            if not self._target_overlay.isVisible():
+                raise RuntimeError('場所選択画面を表示できませんでした。')
+        except Exception as exc:
+            self._cancel_target_position_selection()
+            messagebox.showerror('場所選択エラー', f'場所選択を開始できませんでした。\n{exc}')
 
     def _on_target_position_selected(self, event):
         try:
@@ -1879,14 +1946,16 @@ class HijikimameApp:
             self._update_target_status_labels()
             self.save_settings_file()
             self.broadcast_settings()
-        except:
-            pass
-        self._cancel_target_position_selection()
+        finally:
+            self._cancel_target_position_selection()
 
     def _cancel_target_position_selection(self):
         try:
-            if hasattr(self, '_target_overlay') and self._target_overlay.winfo_exists():
-                self._target_overlay.destroy()
+            overlay = getattr(self, '_target_overlay', None)
+            if isinstance(overlay, QtWidgets.QWidget):
+                overlay.close()
+            elif overlay is not None and overlay.winfo_exists():
+                overlay.destroy()
         except:
             pass
 
@@ -3154,11 +3223,15 @@ class HijikimameApp:
             self.canvas.itemconfigure(self.eye_right_id, state='normal')
         except:
             pass
-        mouse_x = self.master.winfo_pointerx()
-        mouse_y = self.master.winfo_pointery()
+        target_mode = int(self.settings.get('tracking_target_mode', 0))
+        if target_mode in (1, 2) and self.target_position is not None:
+            gaze_x, gaze_y = self.target_position
+        else:
+            gaze_x = self.master.winfo_pointerx()
+            gaze_y = self.master.winfo_pointery()
         char_center_x = self.x + self.image_width // 2 + self._get_center_offset()[0]
         char_center_y = self.y + self.image_height // 2 + self._get_center_offset()[1]
-        dx = mouse_x - char_center_x; dy = mouse_y - char_center_y
+        dx = gaze_x - char_center_x; dy = gaze_y - char_center_y
         dist = math.hypot(dx, dy)
         if dist != 0:
             dx_u, dy_u = dx / dist, dy / dist
@@ -3211,6 +3284,7 @@ class HijikimameApp:
             self.vx = 0; self.vy = 0
         dx_char = target_x - char_center_x; dy_char = target_y - char_center_y
         distance = math.hypot(dx_char, dy_char)
+        repulsion_enabled = bool(self.settings.get('mouse_repulsion_enabled', True)) and target_mode == 0
         touch_margin = max(16, min(self.image_width, self.image_height) // 6)
         is_mouse_over_char = (self.x - touch_margin <= mouse_x <= self.x + self.image_width + touch_margin and
                                self.y - touch_margin <= mouse_y <= self.y + self.image_height + touch_margin)
@@ -3221,7 +3295,6 @@ class HijikimameApp:
             self.y = mouse_y - (self.image_height // 2)
             self.vx = 0; self.vy = 0
         else:
-            repulsion_enabled = self.settings.get('mouse_repulsion_enabled', True)
             # Detect sudden cursor acceleration and convert to an impulse throw
             try:
                 if repulsion_enabled and is_mouse_over_char and mouse_a_mag >= MOUSE_ACCELERATION_THROW_THRESHOLD:
@@ -3238,7 +3311,6 @@ class HijikimameApp:
                 self.throw_cooldown -= 1; self.vx *= 0.92; self.vy *= 0.92
                 self.x += self.vx; self.y += self.vy
             else:
-                repulsion_enabled = self.settings.get('mouse_repulsion_enabled', True)
                 if repulsion_enabled and is_mouse_over_char:
                     actual_bounce_force = max(20, mouse_speed * BOUNCE_STRENGTH, 80.0 / max(distance, 1.0))
                     if distance != 0:
