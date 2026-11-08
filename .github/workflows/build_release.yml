@@ -51,7 +51,7 @@ jobs:
           body: |
             Release ${{ github.ref_name }}
 
-            + ひじき豆を増やす機能
+            + アップデートができないバグを修正
           draft: false
           prerelease: false
           files: |

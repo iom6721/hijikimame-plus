@@ -517,7 +517,7 @@ ADD_BEAN_COMMAND = b'ADD_HIJIKIMAME'
 CLIENT_TIMEOUT = 3.0 
 
 # --- PyInstaller対応関数 ---
-GITHUB_DEFAULT_OWNER = "ramune478"
+GITHUB_DEFAULT_OWNER = "iom6721"
 GITHUB_DEFAULT_REPO = "hijikimame-plus"
 
 def resource_path(relative_path):
@@ -601,11 +601,11 @@ DEFAULT_EYE_COLOR = 'black'
 INVERTED_EYE_COLOR = 'white'
 
 # アプリバージョン（リリースタグと一致させてください）
-VERSION = "v2.4.5"
+VERSION = "v2.4.6"
 
 DISCORD_CLIENT_ID = "1507453857456721951"
 DISCORD_ACTIVITY_STATE = "※これは完全な身内ネタアプリケーションです。"
-DISCORD_REPO_URL = "https://github.com/ramune478/hijikimame-plus"
+DISCORD_REPO_URL = "https://github.com/iom6721/hijikimame-plus"
 CUSTOM_COSMETIC_WARNING = "コスメティックは exe と同じフォルダに保存されます。重要なファイルと同じ場所ですので、管理にはご注意ください。"
 
 
@@ -955,6 +955,7 @@ class HijikimameApp:
         self._latest_update_script_url = None
         self._update_available = False
         self._update_button = None
+        self._qt_update_button = None
         self.discord_presence = None
         self._discord_presence_retry_delay_ms = 30000
         self._discord_presence_retry_scheduled = False
@@ -1142,16 +1143,20 @@ class HijikimameApp:
         return None
 
     def _refresh_update_button(self):
-        try:
-            if self._update_button is None:
-                return
-            if self._update_available:
-                if not self._update_button.winfo_ismapped():
-                    self._update_button.pack(side='right', padx=2)
-            else:
-                self._update_button.pack_forget()
-        except:
-            pass
+        if self._update_button is not None:
+            try:
+                if self._update_available:
+                    if not self._update_button.winfo_ismapped():
+                        self._update_button.pack(side='right', padx=2)
+                else:
+                    self._update_button.pack_forget()
+            except Exception:
+                pass
+        if self._qt_update_button is not None:
+            try:
+                self._qt_update_button.setVisible(self._update_available)
+            except RuntimeError:
+                self._qt_update_button = None
 
     def _perform_update(self):
         if not self._update_available:
@@ -2535,8 +2540,9 @@ class HijikimameApp:
         tk.Button(custom_button_frame, text='追加', command=lambda: self.add_custom_cosmetic(show_warning_var)).pack(side='left', padx=2)
         tk.Button(custom_button_frame, text='適用', command=self.apply_custom_cosmetic_selection).pack(side='left', padx=2)
         tk.Button(custom_button_frame, text='削除', command=self.remove_custom_cosmetic).pack(side='left', padx=2)
-        tk.Button(custom_frame, text='ひじき豆を増やす', command=self.add_hijikimame).pack(fill='x', padx=4, pady=2)
         self._refresh_custom_cosmetic_listbox()
+
+        tk.Button(self._edit_frame, text='ひじき豆を増やす', command=self.add_hijikimame).pack(fill='x', padx=8, pady=2)
 
         adjust_frame = tk.LabelFrame(self._edit_frame, text='コスメティック調整')
         adjust_frame.pack(fill='both', padx=8, pady=5, expand=True)
@@ -2885,10 +2891,10 @@ class HijikimameApp:
             button = QtWidgets.QPushButton(title)
             button.clicked.connect(callback)
             cosmetic_actions.addWidget(button)
+        left_column.addWidget(custom_group)
         add_bean_button = QtWidgets.QPushButton("ひじき豆を増やす")
         add_bean_button.clicked.connect(self.add_hijikimame)
-        custom_layout.addWidget(add_bean_button)
-        left_column.addWidget(custom_group)
+        left_column.addWidget(add_bean_button)
         left_column.addStretch(1)
 
         settings_group = QtWidgets.QGroupBox("設定")
@@ -3001,10 +3007,11 @@ class HijikimameApp:
         close_all_button = QtWidgets.QPushButton("全て閉じる")
         close_all_button.clicked.connect(self.close_all_instances)
         buttons.addWidget(close_all_button)
-        if self._update_available:
-            update_button = QtWidgets.QPushButton("最新バージョンに揃える")
-            update_button.clicked.connect(self._perform_update)
-            buttons.addWidget(update_button)
+        update_button = QtWidgets.QPushButton("最新バージョンに揃える")
+        update_button.clicked.connect(self._perform_update)
+        buttons.addWidget(update_button)
+        self._qt_update_button = update_button
+        self._refresh_update_button()
         buttons.addStretch(1)
         apply_button = QtWidgets.QPushButton("適用")
         apply_button.clicked.connect(apply_qt_settings)
