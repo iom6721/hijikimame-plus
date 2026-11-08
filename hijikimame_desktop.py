@@ -513,6 +513,7 @@ import stat
 HOST = '127.0.0.1'
 PORT = 31500 
 EXIT_COMMAND = b'ANIMATED_EXIT' 
+ADD_BEAN_COMMAND = b'ADD_HIJIKIMAME'
 CLIENT_TIMEOUT = 3.0 
 
 # --- PyInstaller対応関数 ---
@@ -760,6 +761,8 @@ class HijikimameApp:
     def __init__(self, master):
         self.master = master
         self.server_socket = None 
+        self.is_additional_instance = '--additional-bean' in sys.argv
+        self._additional_bean_processes = []
 
         # 掴む・投げる機能用の変数
         self.is_dragging_stop = False 
@@ -768,10 +771,10 @@ class HijikimameApp:
         self.drag_vy = 0 
 
         # --- 多重起動チェック ---
-        if self._is_another_instance_running():
+        if not self.is_additional_instance and self._is_another_instance_running():
             self.master.destroy()
             sys.exit(0)
-        else:
+        elif not self.is_additional_instance:
             self._start_ipc_server()
             atexit.register(self._close_ipc_server)
         
@@ -882,8 +885,8 @@ class HijikimameApp:
 
         screen_width = master.winfo_vrootwidth()
         screen_height = master.winfo_vrootheight()
-        self.x = screen_width // 2 - self.image_width // 2
-        self.y = screen_height // 2 - self.image_height // 2
+        self.x = 0 if self.is_additional_instance else screen_width // 2 - self.image_width // 2
+        self.y = 0 if self.is_additional_instance else screen_height // 2 - self.image_height // 2
         self.vx = 0
         self.vy = 0
         
@@ -943,7 +946,8 @@ class HijikimameApp:
         self.master.bind("<Control-e>", lambda e: self.open_edit_window())
         self.master.bind("<Control-E>", lambda e: self.open_edit_window())
         
-        self.master.after(100, self._check_ipc_command)
+        if not self.is_additional_instance:
+            self.master.after(100, self._check_ipc_command)
         self._latest_update_tag = None
         self._latest_update_body = None
         self._latest_update_download_url = None
@@ -954,14 +958,17 @@ class HijikimameApp:
         self.discord_presence = None
         self._discord_presence_retry_delay_ms = 30000
         self._discord_presence_retry_scheduled = False
-        self.master.after(500, self.start_update_check_thread)
-        self.master.after(1000, self._cleanup_update_file)
-        if self.settings.get('discord_presence_enabled', True):
-            self.start_discord_presence()
-        try:
-            self.master.after(200, lambda: self.open_edit_window())
-        except:
-            pass
+        if self.is_additional_instance:
+            self.master.after(1500, self._poll_settings_file)
+        else:
+            self.master.after(500, self.start_update_check_thread)
+            self.master.after(1000, self._cleanup_update_file)
+            if self.settings.get('discord_presence_enabled', True):
+                self.start_discord_presence()
+            try:
+                self.master.after(200, lambda: self.open_edit_window())
+            except:
+                pass
         self.master.show()
 
     def _show_update_dialog(self, title, text):
@@ -1077,6 +1084,32 @@ class HijikimameApp:
             self.set_mode(5 + index)
         except:
             pass
+
+    def add_hijikimame(self):
+        try:
+            if self.is_additional_instance:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(CLIENT_TIMEOUT)
+                    s.connect((HOST, PORT))
+                    s.sendall(ADD_BEAN_COMMAND)
+                    response = s.recv(4096)
+                if response != b'OK':
+                    raise RuntimeError(response.decode('utf-8', errors='replace'))
+            else:
+                self._launch_additional_bean()
+        except Exception as exc:
+            messagebox.showerror("追加失敗", f"ひじき豆を追加できませんでした。\n{exc}")
+
+    def _launch_additional_bean(self):
+        if getattr(sys, 'frozen', False):
+            command = [sys.executable, '--additional-bean']
+        else:
+            command = [sys.executable, os.path.abspath(__file__), '--additional-bean']
+        process = subprocess.Popen(command, close_fds=True)
+        self._additional_bean_processes = [
+            item for item in self._additional_bean_processes if item.poll() is None
+        ]
+        self._additional_bean_processes.append(process)
 
     def remove_custom_cosmetic(self):
         try:
@@ -1493,6 +1526,7 @@ class HijikimameApp:
             except RuntimeError:
                 pass
         try:
+            self._terminate_additional_beans()
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(0.5)
                 s.connect((HOST, PORT))
@@ -1500,6 +1534,15 @@ class HijikimameApp:
         except:
             pass
         self.start_exit_animation()
+
+    def _terminate_additional_beans(self):
+        for process in self._additional_bean_processes:
+            if process.poll() is None:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+        self._additional_bean_processes = []
 
     # --- IPC処理メソッド群 ---
     def _is_another_instance_running(self):
@@ -1524,6 +1567,7 @@ class HijikimameApp:
             sys.exit(1)
             
     def _close_ipc_server(self):
+        self._terminate_additional_beans()
         if self.server_socket: self.server_socket.close()
 
     def _check_ipc_command(self):
@@ -1533,7 +1577,14 @@ class HijikimameApp:
             with conn:
                 data = conn.recv(4096)
                 if data == EXIT_COMMAND:
+                    self._terminate_additional_beans()
                     self.start_exit_animation()
+                elif data == ADD_BEAN_COMMAND:
+                    try:
+                        self._launch_additional_bean()
+                        conn.sendall(b'OK')
+                    except Exception as exc:
+                        conn.sendall(f"ERROR:{exc}".encode('utf-8', errors='replace'))
                 elif data.startswith(b'SETTINGS:'):
                     try:
                         payload = data[len(b'SETTINGS:'):].decode('utf-8')
@@ -2484,6 +2535,7 @@ class HijikimameApp:
         tk.Button(custom_button_frame, text='追加', command=lambda: self.add_custom_cosmetic(show_warning_var)).pack(side='left', padx=2)
         tk.Button(custom_button_frame, text='適用', command=self.apply_custom_cosmetic_selection).pack(side='left', padx=2)
         tk.Button(custom_button_frame, text='削除', command=self.remove_custom_cosmetic).pack(side='left', padx=2)
+        tk.Button(custom_frame, text='ひじき豆を増やす', command=self.add_hijikimame).pack(fill='x', padx=4, pady=2)
         self._refresh_custom_cosmetic_listbox()
 
         adjust_frame = tk.LabelFrame(self._edit_frame, text='コスメティック調整')
@@ -2828,10 +2880,14 @@ class HijikimameApp:
                 self.set_mode(0)
             self.save_settings_file()
 
-        for title, callback in (("追加", add_cosmetic), ("適用", apply_cosmetic), ("削除", remove_cosmetic)):
+        for title, callback in (("追加", add_cosmetic), ("適用", apply_cosmetic),
+                                ("削除", remove_cosmetic)):
             button = QtWidgets.QPushButton(title)
             button.clicked.connect(callback)
             cosmetic_actions.addWidget(button)
+        add_bean_button = QtWidgets.QPushButton("ひじき豆を増やす")
+        add_bean_button.clicked.connect(self.add_hijikimame)
+        custom_layout.addWidget(add_bean_button)
         left_column.addWidget(custom_group)
         left_column.addStretch(1)
 
@@ -2972,9 +3028,37 @@ class HijikimameApp:
             settings_dict = dict(settings_dict)
             if 'edit_enabled' in settings_dict:
                 settings_dict.pop('edit_enabled', None)
+            previous_settings = self.settings.copy()
             for k, v in settings_dict.items():
                 self.settings[k] = v
             self.remaining_bounces = int(self.settings.get('edge_bounce_count', EDGE_BOUNCE_COUNT_DEFAULT))
+
+            target_position = self.settings.get('target_position')
+            if isinstance(target_position, (list, tuple)) and len(target_position) == 2:
+                self.target_position = (int(target_position[0]), int(target_position[1]))
+            else:
+                self.target_position = None
+
+            target_image_path = self.settings.get('target_image_path')
+            if target_image_path != previous_settings.get('target_image_path'):
+                self.target_image_path = target_image_path
+                self.target_image_template = self.load_image(target_image_path) if target_image_path else None
+
+            selected_mode = int(self.settings.get('selected_mode', self.current_mode))
+            visual_settings = ('custom_cosmetics', 'character_scale')
+            if selected_mode != self.current_mode:
+                self.set_mode(selected_mode, save=False)
+            elif any(previous_settings.get(key) != self.settings.get(key) for key in visual_settings):
+                self.set_mode(self.current_mode, save=False)
+
+            eye_settings = ('eye_offset_x', 'eye_offset_y', 'center_offset_x',
+                            'center_offset_y', 'eye_radius', 'eye_movement_limit')
+            if any(previous_settings.get(key) != self.settings.get(key) for key in eye_settings):
+                self._update_eye_positions()
+            if hasattr(self, '_custom_cosmetic_listbox'):
+                self._refresh_custom_cosmetic_listbox()
+            if any(key in settings_dict for key in ('tracking_target_mode', 'target_position', 'target_image_path')):
+                self._update_target_status_labels()
         except:
             pass
 
