@@ -51,7 +51,7 @@ jobs:
           body: |
             Release ${{ github.ref_name }}
 
-            + 追尾機能がつかえないバグを修正
+            + ひじき豆を増やす機能
           draft: false
           prerelease: false
           files: |
