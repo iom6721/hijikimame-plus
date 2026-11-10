@@ -515,6 +515,8 @@ PORT = 31500
 EXIT_COMMAND = b'ANIMATED_EXIT' 
 ADD_BEAN_COMMAND = b'ADD_HIJIKIMAME'
 CLIENT_TIMEOUT = 3.0 
+BEAN_POSITION_SYNC_INTERVAL = 100
+BEAN_POSITION_STALE_AFTER = 1.0
 
 # --- PyInstaller対応関数 ---
 GITHUB_DEFAULT_OWNER = "iom6721"
@@ -601,7 +603,7 @@ DEFAULT_EYE_COLOR = 'black'
 INVERTED_EYE_COLOR = 'white'
 
 # アプリバージョン（リリースタグと一致させてください）
-VERSION = "v2.4.6"
+VERSION = "v2.4.7"
 
 DISCORD_CLIENT_ID = "1507453857456721951"
 DISCORD_ACTIVITY_STATE = "※これは完全な身内ネタアプリケーションです。"
@@ -763,6 +765,9 @@ class HijikimameApp:
         self.server_socket = None 
         self.is_additional_instance = '--additional-bean' in sys.argv
         self._additional_bean_processes = []
+        self._bean_positions = {}
+        self._bean_peer_positions = {}
+        self._last_bean_position_sync = 0
 
         # 掴む・投げる機能用の変数
         self.is_dragging_stop = False 
@@ -947,7 +952,7 @@ class HijikimameApp:
         self.master.bind("<Control-E>", lambda e: self.open_edit_window())
         
         if not self.is_additional_instance:
-            self.master.after(100, self._check_ipc_command)
+            self.master.after(30, self._check_ipc_command)
         self._latest_update_tag = None
         self._latest_update_body = None
         self._latest_update_download_url = None
@@ -1578,27 +1583,51 @@ class HijikimameApp:
     def _check_ipc_command(self):
         if self.is_exiting or not self.server_socket: return 
         try:
-            conn, addr = self.server_socket.accept()
-            with conn:
-                data = conn.recv(4096)
-                if data == EXIT_COMMAND:
-                    self._terminate_additional_beans()
-                    self.start_exit_animation()
-                elif data == ADD_BEAN_COMMAND:
-                    try:
-                        self._launch_additional_bean()
-                        conn.sendall(b'OK')
-                    except Exception as exc:
-                        conn.sendall(f"ERROR:{exc}".encode('utf-8', errors='replace'))
-                elif data.startswith(b'SETTINGS:'):
-                    try:
-                        payload = data[len(b'SETTINGS:'):].decode('utf-8')
-                        settings = json.loads(payload)
-                        self.apply_remote_settings(settings)
-                    except:
-                        pass
+            while True:
+                try:
+                    conn, _ = self.server_socket.accept()
+                except BlockingIOError:
+                    break
+                with conn:
+                    data = conn.recv(65536)
+                    if data == EXIT_COMMAND:
+                        self._terminate_additional_beans()
+                        self.start_exit_animation()
+                    elif data == ADD_BEAN_COMMAND:
+                        try:
+                            self._launch_additional_bean()
+                            conn.sendall(b'OK')
+                        except Exception as exc:
+                            conn.sendall(f"ERROR:{exc}".encode('utf-8', errors='replace'))
+                    elif data.startswith(b'SETTINGS:'):
+                        try:
+                            payload = data[len(b'SETTINGS:'):].decode('utf-8')
+                            settings = json.loads(payload)
+                            self.apply_remote_settings(settings)
+                        except:
+                            pass
+                    elif data.startswith(b'BEAN_POSITION:'):
+                        try:
+                            position = json.loads(data[len(b'BEAN_POSITION:'):].decode('utf-8'))
+                            bean_id = int(position['id'])
+                            position['updated_at'] = time.monotonic()
+                            self._bean_positions[bean_id] = position
+                            now = time.monotonic()
+                            self._bean_positions = {
+                                key: value for key, value in self._bean_positions.items()
+                                if now - value['updated_at'] <= BEAN_POSITION_STALE_AFTER
+                            }
+                            peers = [
+                                self._current_bean_position(),
+                                *self._bean_positions.values(),
+                            ]
+                            conn.sendall(json.dumps(
+                                [peer for peer in peers if int(peer['id']) != bean_id]
+                            ).encode('utf-8'))
+                        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                            conn.sendall(b'[]')
         except: pass
-        self.master.after(100, self._check_ipc_command)
+        self.master.after(30, self._check_ipc_command)
 
     # --- 画像処理・モード切替 ---
     def _create_selective_mask(self, image):
@@ -3342,6 +3371,7 @@ class HijikimameApp:
 
     def update_position(self):
         if self.is_exiting: return
+        peer_positions = self._get_bean_peer_positions()
         mouse_x = self.master.winfo_pointerx()
         mouse_y = self.master.winfo_pointery()
         mouse_vx = mouse_x - self.last_mouse_x
@@ -3401,6 +3431,8 @@ class HijikimameApp:
             if self.throw_cooldown > 0:
                 self.throw_cooldown -= 1; self.vx *= 0.92; self.vy *= 0.92
                 self.x += self.vx; self.y += self.vy
+                if bool(self.settings.get('mouse_repulsion_enabled', True)):
+                    self._apply_bean_repulsion(peer_positions)
             else:
                 if repulsion_enabled and is_mouse_over_char:
                     actual_bounce_force = max(20, mouse_speed * BOUNCE_STRENGTH, 80.0 / max(distance, 1.0))
@@ -3420,6 +3452,8 @@ class HijikimameApp:
                     track_speed = float(self.settings.get('tracking_speed', TRACKING_SPEED))
                     self.vx = (self.vx + dx_char * track_speed) * 0.85
                     self.vy = (self.vy + dy_char * track_speed) * 0.85
+                if bool(self.settings.get('mouse_repulsion_enabled', True)):
+                    self._apply_bean_repulsion(peer_positions)
                 self.x += self.vx; self.y += self.vy
 
         # remember last mouse velocity and position for next-frame accel calculation
@@ -3503,6 +3537,77 @@ class HijikimameApp:
         self.master.geometry(f"+{int(self.x)}+{int(self.y)}"); self.update_eyes_only()
         if not self.is_exiting:
             self.master.after(UPDATE_INTERVAL, self.update_position)
+
+    def _current_bean_position(self):
+        return {
+            'id': os.getpid(),
+            'x': self.x,
+            'y': self.y,
+            'width': self.image_width,
+            'height': self.image_height,
+        }
+
+    def _get_bean_peer_positions(self):
+        now = time.monotonic()
+        if self.is_additional_instance and now - self._last_bean_position_sync >= BEAN_POSITION_SYNC_INTERVAL / 1000:
+            self._last_bean_position_sync = now
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.1)
+                    s.connect((HOST, PORT))
+                    request = b'BEAN_POSITION:' + json.dumps(
+                        self._current_bean_position()
+                    ).encode('utf-8')
+                    s.sendall(request)
+                    response = s.recv(65536)
+                peers = json.loads(response.decode('utf-8'))
+                self._bean_peer_positions = {
+                    int(peer['id']): peer for peer in peers
+                }
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+                pass
+
+        if not self.is_additional_instance:
+            self._bean_positions = {
+                key: value for key, value in self._bean_positions.items()
+                if now - value['updated_at'] <= BEAN_POSITION_STALE_AFTER
+            }
+            return list(self._bean_positions.values())
+        return list(self._bean_peer_positions.values())
+
+    def _apply_bean_repulsion(self, peer_positions):
+        if not bool(self.settings.get('mouse_repulsion_enabled', True)):
+            return
+        own_center_x = self.x + self.image_width / 2
+        own_center_y = self.y + self.image_height / 2
+        own_radius = max(self.image_width, self.image_height) / 2
+        own_id = os.getpid()
+
+        for peer in peer_positions:
+            peer_x = float(peer['x']) + float(peer['width']) / 2
+            peer_y = float(peer['y']) + float(peer['height']) / 2
+            radius = own_radius + max(float(peer['width']), float(peer['height'])) / 2
+            dx = own_center_x - peer_x
+            dy = own_center_y - peer_y
+            distance = math.hypot(dx, dy)
+            if distance >= radius:
+                continue
+            if distance == 0:
+                peer_id = int(peer['id'])
+                angle = ((min(own_id, peer_id) * 31 + max(own_id, peer_id) * 17) % 360) * math.pi / 180
+                direction = 1 if own_id > peer_id else -1
+                nx = math.cos(angle) * direction
+                ny = math.sin(angle) * direction
+            else:
+                nx = dx / distance
+                ny = dy / distance
+            overlap = radius - distance
+            force = max(2.0, overlap * 0.35)
+            self.vx += nx * force
+            self.vy += ny * force
+            separation = min(overlap * 0.15, max(self.image_width, self.image_height) * 0.15)
+            self.x += nx * separation
+            self.y += ny * separation
 
     def start_exit_animation(self):
         if self.is_exiting: return 

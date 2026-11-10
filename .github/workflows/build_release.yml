@@ -51,7 +51,7 @@ jobs:
           body: |
             Release ${{ github.ref_name }}
 
-            + アップデートができないバグを修正
+            + ひじき豆の反発対象を増やしました。
           draft: false
           prerelease: false
           files: |
