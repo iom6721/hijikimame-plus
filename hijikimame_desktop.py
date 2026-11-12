@@ -583,6 +583,7 @@ TRACKING_SPEED = 0.01
 COLLISION_DISTANCE_BASE = 50 
 COLLISION_EXPANSION_RATE = 0.3 
 BOUNCE_STRENGTH = 1.5          
+MOUSE_REPULSION_OVERSHOOT = 8.0
 UPDATE_INTERVAL = 30 
 MAX_ACCEL_FORCE = 5            
 THROW_MULTIPLIER = 3           
@@ -616,7 +617,7 @@ DEFAULT_EYE_COLOR = 'black'
 INVERTED_EYE_COLOR = 'white'
 
 # アプリバージョン（リリースタグと一致させてください）
-VERSION = "v2.5.1"
+VERSION = "v2.5.2"
 
 DISCORD_CLIENT_ID = "1507453857456721951"
 DISCORD_ACTIVITY_STATE = "※これは完全な身内ネタアプリケーションです。"
@@ -785,6 +786,7 @@ class HijikimameApp:
         # 掴む・投げる機能用の変数
         self.is_dragging_stop = False 
         self.throw_cooldown = 0 
+        self._mouse_repulsion_active = False
         self.drag_vx = 0
         self.drag_vy = 0 
 
@@ -816,6 +818,9 @@ class HijikimameApp:
             'edge_bounce_count': EDGE_BOUNCE_COUNT_DEFAULT,
             'edge_bounce_strength': EDGE_BOUNCE_STRENGTH,
             'mouse_repulsion_enabled': True,
+            'mouse_repulsion_range': 0,
+            'bean_repulsion_enabled': True,
+            'bean_repulsion_multiplier': 1.0,
             'screen_boundary_mode': 'bounce',
             'custom_cosmetics': [],
             'show_cosmetic_warning': True,
@@ -832,6 +837,9 @@ class HijikimameApp:
             cfg = self.load_settings_file()
             if isinstance(cfg, dict):
                 self.settings.update(cfg)
+                if 'bean_repulsion_enabled' not in cfg:
+                    self.settings['bean_repulsion_enabled'] = bool(
+                        self.settings.get('mouse_repulsion_enabled', True))
         except:
             pass
 
@@ -2679,6 +2687,22 @@ class HijikimameApp:
         self.repulsion_var = repulsion_var
         repulsion_cb = tk.Checkbutton(self._edit_frame, text="ひじき豆の反発", variable=repulsion_var)
         repulsion_cb.pack(anchor='w', padx=8, pady=2)
+        tk.Label(self._edit_frame, text="マウス反発の当たり判定追加 (px):").pack(anchor='w', padx=8)
+        self.mouse_repulsion_range_scale = tk.Scale(
+            self._edit_frame, from_=0, to=100, resolution=1, orient='horizontal')
+        self.mouse_repulsion_range_scale.set(self.settings.get('mouse_repulsion_range', 0))
+        self.mouse_repulsion_range_scale.pack(fill='x', padx=8)
+
+        bean_repulsion_var = tk.IntVar(value=1 if self.settings.get('bean_repulsion_enabled', True) else 0)
+        self.bean_repulsion_var = bean_repulsion_var
+        bean_repulsion_cb = tk.Checkbutton(
+            self._edit_frame, text="ひじき豆同士の反発", variable=bean_repulsion_var)
+        bean_repulsion_cb.pack(anchor='w', padx=8, pady=2)
+        tk.Label(self._edit_frame, text="ひじき豆同士の反発強さ (通常の反発 × n):").pack(anchor='w', padx=8)
+        self.bean_repulsion_multiplier_scale = tk.Scale(
+            self._edit_frame, from_=0, to=5, resolution=0.1, orient='horizontal')
+        self.bean_repulsion_multiplier_scale.set(self.settings.get('bean_repulsion_multiplier', 1.0))
+        self.bean_repulsion_multiplier_scale.pack(fill='x', padx=8)
 
         tk.Label(self._edit_frame, text="画面端の挙動:").pack(anchor='w', padx=8)
         boundary_mode_var = tk.StringVar(value=self.settings.get('screen_boundary_mode', 'bounce'))
@@ -2791,6 +2815,9 @@ class HijikimameApp:
         def apply_settings():
             self.settings['nijiki_fps'] = int(self.nijiki_scale.get())
             self.settings['mouse_repulsion_enabled'] = bool(repulsion_var.get())
+            self.settings['mouse_repulsion_range'] = int(self.mouse_repulsion_range_scale.get())
+            self.settings['bean_repulsion_enabled'] = bool(bean_repulsion_var.get())
+            self.settings['bean_repulsion_multiplier'] = float(self.bean_repulsion_multiplier_scale.get())
             self.settings['tracking_speed'] = float(self.tracking_scale.get())
             self.settings['throw_speed_multiplier'] = float(self.throw_scale.get())
             self.settings['max_throw_multiplier'] = float(self.max_throw_scale.get())
@@ -2859,6 +2886,9 @@ class HijikimameApp:
             self.settings['edge_bounce_count'] = EDGE_BOUNCE_COUNT_DEFAULT
             self.settings['edge_bounce_strength'] = EDGE_BOUNCE_STRENGTH
             self.settings['mouse_repulsion_enabled'] = True
+            self.settings['mouse_repulsion_range'] = 0
+            self.settings['bean_repulsion_enabled'] = True
+            self.settings['bean_repulsion_multiplier'] = 1.0
             self.settings['screen_boundary_mode'] = 'bounce'
             self.settings['show_cosmetic_warning'] = True
             self.settings['selected_mode'] = 0
@@ -2889,6 +2919,9 @@ class HijikimameApp:
             self.bounce_scale.set(EDGE_BOUNCE_COUNT_DEFAULT)
             self.bounce_strength_scale.set(EDGE_BOUNCE_STRENGTH)
             repulsion_var.set(1)
+            self.mouse_repulsion_range_scale.set(0)
+            bean_repulsion_var.set(1)
+            self.bean_repulsion_multiplier_scale.set(1.0)
             show_warning_var.set(1)
             boundary_mode_var.set('bounce')
             fullscreen_var.set(0)
@@ -3065,6 +3098,7 @@ class HijikimameApp:
         checkboxes = {}
         checkbox_specs = (
             ('mouse_repulsion_enabled', "ひじき豆の反発", True),
+            ('bean_repulsion_enabled', "ひじき豆同士の反発", True),
             ('show_cosmetic_warning', "コスメ追加時の警告を表示する", True),
             ('image_tracking_force_fullscreen', "軽量化: 全画面追尾を常に行う", False),
             ('discord_presence_enabled', "Discord連携を有効にする", True),
@@ -3092,6 +3126,8 @@ class HijikimameApp:
             ('eye_radius', '目の大きさ (%)', 0, 200, 1, 100.0),
             ('eye_movement_limit', '目の動く範囲', 0, 20, 1, EYE_MOVEMENT_LIMIT),
             ('tracking_speed', '追尾速度', 0, 0.1, 0.001, TRACKING_SPEED),
+            ('mouse_repulsion_range', 'マウス反発の当たり判定追加 (px)', 0, 100, 1, 0),
+            ('bean_repulsion_multiplier', 'ひじき豆同士の反発 (通常の反発 × n)', 0, 5, 0.1, 1.0),
             ('throw_speed_multiplier', '投げ速度倍率', 0.1, 10, 0.1, 2.5),
             ('max_throw_multiplier', '投げ最大倍率', 1, 50, 1, 10),
             ('image_tracking_interval', '画像追尾間隔 (秒)', 0, 2, 0.1, 1.0),
@@ -3101,29 +3137,49 @@ class HijikimameApp:
             ('nijiki_fps', '虹き豆 再生速度 (FPS)', 1, 60, 1, NIJIKI_DEFAULT_FPS),
         )
         controls = {}
+        slider_scales = {'mouse_repulsion_range': 1, 'bean_repulsion_multiplier': 0.1}
         settings_row_offset = len(checkbox_specs) + 1
         for index, (key, title, minimum, maximum, step, default) in enumerate(control_specs):
-            control = QtWidgets.QDoubleSpinBox()
-            control.setRange(minimum, maximum)
-            control.setSingleStep(step)
-            control.setDecimals(3 if step < 0.01 else (2 if step < 1 else 0))
             value = float(self.settings.get(key, default))
             if key in ('eye_offset_y', 'center_offset_y'):
                 value = -value
-            control.setValue(value)
+            if key in slider_scales:
+                scale = slider_scales[key]
+                control = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+                control.setRange(round(minimum / scale), round(maximum / scale))
+                control.setSingleStep(1)
+                control.setValue(round(value / scale))
+                value_label = QtWidgets.QLabel(f'{control.value() * scale:g}')
+                value_layout = QtWidgets.QHBoxLayout()
+                value_layout.setContentsMargins(0, 0, 0, 0)
+                value_layout.addWidget(control)
+                value_layout.addWidget(value_label)
+                control.valueChanged.connect(
+                    lambda slider_value, label=value_label, factor=scale:
+                    label.setText(f'{slider_value * factor:g}'))
+                control_widget = QtWidgets.QWidget()
+                control_widget.setLayout(value_layout)
+            else:
+                control = QtWidgets.QDoubleSpinBox()
+                control.setRange(minimum, maximum)
+                control.setSingleStep(step)
+                control.setDecimals(3 if step < 0.01 else (2 if step < 1 else 0))
+                control.setValue(value)
+                control_widget = control
             controls[key] = control
             row = settings_row_offset + index // 2
             column = (index % 2) * 2
             settings_layout.addWidget(QtWidgets.QLabel(title + ":"), row, column)
-            settings_layout.addWidget(control, row, column + 1)
+            settings_layout.addWidget(control_widget, row, column + 1)
 
         def apply_qt_settings():
             for key, control in controls.items():
-                value = control.value()
+                value = control.value() * slider_scales.get(key, 1)
                 if key in ('eye_offset_y', 'center_offset_y'):
                     value = -value
                 if key in ('eye_offset_x', 'eye_offset_y', 'center_offset_x',
-                           'center_offset_y', 'edge_bounce_count', 'nijiki_fps'):
+                           'center_offset_y', 'mouse_repulsion_range',
+                           'edge_bounce_count', 'nijiki_fps'):
                     value = int(value)
                 self.settings[key] = value
             for key, checkbox in checkboxes.items():
@@ -3145,14 +3201,19 @@ class HijikimameApp:
                 'center_offset_x': CENTER_OFFSET_X, 'center_offset_y': CENTER_OFFSET_Y,
                 'character_scale': 100.0, 'eye_radius': 100.0,
                 'eye_movement_limit': EYE_MOVEMENT_LIMIT, 'tracking_speed': TRACKING_SPEED,
+                'mouse_repulsion_range': 0, 'bean_repulsion_multiplier': 1.0,
                 'throw_speed_multiplier': 2.5, 'max_throw_multiplier': 10,
                 'image_tracking_interval': 1.0, 'image_tracking_min_match_score': 0.6,
                 'edge_bounce_count': EDGE_BOUNCE_COUNT_DEFAULT,
                 'edge_bounce_strength': EDGE_BOUNCE_STRENGTH, 'nijiki_fps': NIJIKI_DEFAULT_FPS,
             }
             for key, value in defaults.items():
-                controls[key].setValue(-value if key in ('eye_offset_y', 'center_offset_y') else value)
+                value = -value if key in ('eye_offset_y', 'center_offset_y') else value
+                if key in slider_scales:
+                    value = round(value / slider_scales[key])
+                controls[key].setValue(value)
             for key, value in (('mouse_repulsion_enabled', True),
+                               ('bean_repulsion_enabled', True),
                                ('show_cosmetic_warning', True),
                                ('image_tracking_force_fullscreen', False),
                                ('discord_presence_enabled', True)):
@@ -3292,6 +3353,9 @@ class HijikimameApp:
                 raise Exception('invalid')
             for k, v in data.items():
                 self.settings[k] = v
+            if 'bean_repulsion_enabled' not in data:
+                self.settings['bean_repulsion_enabled'] = bool(
+                    data.get('mouse_repulsion_enabled', True))
             # Ensure our keys and types
             self.settings.setdefault('tracking_speed', TRACKING_SPEED)
             self.settings.setdefault('throw_speed_multiplier', 2.5)
@@ -3299,6 +3363,9 @@ class HijikimameApp:
             self.settings.setdefault('edge_bounce_count', EDGE_BOUNCE_COUNT_DEFAULT)
             self.settings.setdefault('edge_bounce_strength', EDGE_BOUNCE_STRENGTH)
             self.settings.setdefault('mouse_repulsion_enabled', True)
+            self.settings.setdefault('mouse_repulsion_range', 0)
+            self.settings.setdefault('bean_repulsion_enabled', True)
+            self.settings.setdefault('bean_repulsion_multiplier', 1.0)
             self.settings.setdefault('screen_boundary_mode', 'bounce')
             self.settings.setdefault('show_cosmetic_warning', True)
             self.settings.setdefault('nijiki_fps', NIJIKI_DEFAULT_FPS)
@@ -3391,6 +3458,13 @@ class HijikimameApp:
                             self.fullscreen_var.set(1 if self.settings.get('image_tracking_force_fullscreen', False) else 0)
                         if hasattr(self, 'repulsion_var'):
                             self.repulsion_var.set(1 if self.settings.get('mouse_repulsion_enabled', True) else 0)
+                        if hasattr(self, 'mouse_repulsion_range_scale'):
+                            self.mouse_repulsion_range_scale.set(self.settings.get('mouse_repulsion_range', 0))
+                        if hasattr(self, 'bean_repulsion_var'):
+                            self.bean_repulsion_var.set(1 if self.settings.get('bean_repulsion_enabled', True) else 0)
+                        if hasattr(self, 'bean_repulsion_multiplier_scale'):
+                            self.bean_repulsion_multiplier_scale.set(
+                                self.settings.get('bean_repulsion_multiplier', 1.0))
                         if hasattr(self, 'boundary_mode_var'):
                             self.boundary_mode_var.set(self.settings.get('screen_boundary_mode', 'bounce'))
                         if hasattr(self, 'show_warning_var'):
@@ -3535,20 +3609,40 @@ class HijikimameApp:
         distance = math.hypot(dx_char, dy_char)
         repulsion_enabled = bool(self.settings.get('mouse_repulsion_enabled', True)) and target_mode == 0
         touch_margin = max(16, min(self.image_width, self.image_height) // 6)
-        is_mouse_over_char = (self.x - touch_margin <= mouse_x <= self.x + self.image_width + touch_margin and
-                               self.y - touch_margin <= mouse_y <= self.y + self.image_height + touch_margin)
+        touch_margin += max(0, min(100, int(self.settings.get('mouse_repulsion_range', 0))))
+        is_mouse_over_char = (repulsion_enabled and
+                              self.x - touch_margin <= mouse_x <= self.x + self.image_width + touch_margin and
+                              self.y - touch_margin <= mouse_y <= self.y + self.image_height + touch_margin)
+        if is_mouse_over_char and mouse_speed >= 1:
+            mouse_direction_x = mouse_vx / mouse_speed
+            mouse_direction_y = mouse_vy / mouse_speed
+            past_character_center = (
+                (mouse_x - char_center_x) * mouse_direction_x
+                + (mouse_y - char_center_y) * mouse_direction_y
+            )
+            mouse_repulsion_contact = past_character_center >= MOUSE_REPULSION_OVERSHOOT
+        else:
+            mouse_repulsion_contact = is_mouse_over_char
+        if not is_mouse_over_char:
+            self._mouse_repulsion_active = False
+        mouse_repulsion_started = (
+            mouse_repulsion_contact and not self._mouse_repulsion_active
+        )
+        if mouse_repulsion_contact:
+            self._mouse_repulsion_active = True
 
         # If the user is holding the character, follow cursor as before
         if self.is_dragging_stop:
+            self._mouse_repulsion_active = False
             self.x = mouse_x - (self.image_width // 2)
             self.y = mouse_y - (self.image_height // 2)
             self.vx = 0; self.vy = 0
         else:
             # Detect sudden cursor acceleration and convert to an impulse throw
             try:
-                if repulsion_enabled and is_mouse_over_char and mouse_a_mag >= MOUSE_ACCELERATION_THROW_THRESHOLD:
-                    self.vx = mouse_ax * MOUSE_ACCELERATION_THROW_MULTIPLIER
-                    self.vy = mouse_ay * MOUSE_ACCELERATION_THROW_MULTIPLIER
+                if repulsion_enabled and mouse_repulsion_contact and mouse_a_mag >= MOUSE_ACCELERATION_THROW_THRESHOLD:
+                    self.vx += mouse_ax * MOUSE_ACCELERATION_THROW_MULTIPLIER
+                    self.vy += mouse_ay * MOUSE_ACCELERATION_THROW_MULTIPLIER
                     self.throw_cooldown = THROW_COOLDOWN_FRAMES
                     self.remaining_bounces = self.settings.get('edge_bounce_count', EDGE_BOUNCE_COUNT_DEFAULT)
                     self._last_throw_velocity = (self.vx, self.vy)
@@ -3564,9 +3658,11 @@ class HijikimameApp:
                     self.vx = (self.vx + dx_char * track_speed) * 0.85
                     self.vy = (self.vy + dy_char * track_speed) * 0.85
 
-            if repulsion_enabled and is_mouse_over_char:
+            if repulsion_enabled and mouse_repulsion_started:
                 self._apply_mouse_repulsion(dx_char, dy_char, distance, mouse_speed)
-            if bool(self.settings.get('mouse_repulsion_enabled', True)):
+                if self.throw_cooldown > 0:
+                    self._last_throw_velocity = (self.vx, self.vy)
+            if bool(self.settings.get('bean_repulsion_enabled', True)):
                 self._apply_bean_repulsion(peer_positions)
             self.x += self.vx; self.y += self.vy
 
@@ -3692,8 +3788,9 @@ class HijikimameApp:
         return list(self._bean_peer_positions.values())
 
     def _apply_bean_repulsion(self, peer_positions):
-        if not bool(self.settings.get('mouse_repulsion_enabled', True)):
+        if not bool(self.settings.get('bean_repulsion_enabled', True)):
             return
+        multiplier = max(0.0, min(5.0, float(self.settings.get('bean_repulsion_multiplier', 1.0))))
         own_center_x = self.x + self.image_width / 2
         own_center_y = self.y + self.image_height / 2
         own_radius = max(self.image_width, self.image_height) / 2
@@ -3748,7 +3845,7 @@ class HijikimameApp:
 
             closing_speed = -(relative_vx * nx + relative_vy * ny)
             if closing_speed > 0:
-                impulse = closing_speed * 0.9
+                impulse = closing_speed * 0.9 * multiplier
                 self.vx += nx * impulse
                 self.vy += ny * impulse
             elif overlap == 0:
@@ -3769,15 +3866,8 @@ class HijikimameApp:
             force_x = -dx / distance * force
             force_y = -dy / distance * force
 
-        current_speed = math.hypot(self.vx, self.vy)
         self.vx += force_x
         self.vy += force_y
-        combined_speed = math.hypot(self.vx, self.vy)
-        speed_limit = max(current_speed, force)
-        if combined_speed > speed_limit:
-            scale = speed_limit / combined_speed
-            self.vx *= scale
-            self.vy *= scale
 
     def start_exit_animation(self):
         if self.is_exiting: return 

@@ -51,7 +51,7 @@ jobs:
           body: |
             Release ${{ github.ref_name }}
 
-            まだここには何も書かれていないようです:(
+            まだここには何も書かれていないようです:)
           draft: false
           prerelease: false
           files: |
