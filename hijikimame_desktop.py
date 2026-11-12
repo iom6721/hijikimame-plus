@@ -51,6 +51,7 @@ class _QtCanvas(QtWidgets.QWidget):
         self._next_id = 1
         self._mouse_handlers = {}
         self._layout = None
+        self._pixmap_cache = collections.OrderedDict()
 
     def pack(self):
         parent = self.parentWidget()
@@ -160,12 +161,21 @@ class _QtCanvas(QtWidgets.QWidget):
                 if image is None:
                     continue
                 try:
-                    pil_img = image
-                    if hasattr(pil_img, 'image'):
-                        pil_img = pil_img.image
-                    pil_img = pil_img.convert('RGBA')
-                    qimage = QtGui.QImage(pil_img.tobytes('raw', 'RGBA'), pil_img.width, pil_img.height, QtGui.QImage.Format_RGBA8888)
-                    pixmap = QtGui.QPixmap.fromImage(qimage)
+                    source_img = image.image if hasattr(image, 'image') else image
+                    cache_key = id(source_img)
+                    cached = self._pixmap_cache.get(cache_key)
+                    if cached is not None and cached[0] is source_img:
+                        pixmap = cached[1]
+                        self._pixmap_cache.move_to_end(cache_key)
+                    else:
+                        rgba_img = source_img.convert('RGBA')
+                        qimage = QtGui.QImage(
+                            rgba_img.tobytes('raw', 'RGBA'), rgba_img.width,
+                            rgba_img.height, QtGui.QImage.Format_RGBA8888)
+                        pixmap = QtGui.QPixmap.fromImage(qimage)
+                        self._pixmap_cache[cache_key] = (source_img, pixmap)
+                        while len(self._pixmap_cache) > 64:
+                            self._pixmap_cache.popitem(last=False)
                     painter.drawPixmap(int(item['x'] - pixmap.width() / 2), int(item['y'] - pixmap.height() / 2), pixmap)
                 except Exception:
                     continue
@@ -530,6 +540,7 @@ ADD_BEAN_COMMAND = b'ADD_HIJIKIMAME'
 CLIENT_TIMEOUT = 3.0 
 BEAN_POSITION_SYNC_INTERVAL = 30
 BEAN_POSITION_STALE_AFTER = 1.0
+MOUSE_REPULSION_THROW_GRACE_SECONDS = 1.0
 
 # --- PyInstaller対応関数 ---
 GITHUB_DEFAULT_OWNER = "iom6721"
@@ -617,7 +628,7 @@ DEFAULT_EYE_COLOR = 'black'
 INVERTED_EYE_COLOR = 'white'
 
 # アプリバージョン（リリースタグと一致させてください）
-VERSION = "v2.5.2"
+VERSION = "v2.5.3"
 
 DISCORD_CLIENT_ID = "1507453857456721951"
 DISCORD_ACTIVITY_STATE = "※これは完全な身内ネタアプリケーションです。"
@@ -781,12 +792,15 @@ class HijikimameApp:
         self._additional_bean_processes = []
         self._bean_positions = {}
         self._bean_peer_positions = {}
-        self._last_bean_position_sync = 0
+        self._bean_peer_positions_lock = threading.Lock()
+        self._bean_peer_positions_updated_at = 0.0
+        self._bean_sync_stop = threading.Event()
 
         # 掴む・投げる機能用の変数
         self.is_dragging_stop = False 
         self.throw_cooldown = 0 
         self._mouse_repulsion_active = False
+        self._mouse_repulsion_ignore_until = 0.0
         self.drag_vx = 0
         self.drag_vy = 0 
 
@@ -974,6 +988,8 @@ class HijikimameApp:
         
         if not self.is_additional_instance:
             self.master.after(30, self._check_ipc_command)
+        else:
+            self._start_bean_position_sync()
         self._latest_update_tag = None
         self._latest_update_body = None
         self._latest_update_download_url = None
@@ -3137,44 +3153,27 @@ class HijikimameApp:
             ('nijiki_fps', '虹き豆 再生速度 (FPS)', 1, 60, 1, NIJIKI_DEFAULT_FPS),
         )
         controls = {}
-        slider_scales = {'mouse_repulsion_range': 1, 'bean_repulsion_multiplier': 0.1}
         settings_row_offset = len(checkbox_specs) + 1
         for index, (key, title, minimum, maximum, step, default) in enumerate(control_specs):
             value = float(self.settings.get(key, default))
             if key in ('eye_offset_y', 'center_offset_y'):
                 value = -value
-            if key in slider_scales:
-                scale = slider_scales[key]
-                control = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-                control.setRange(round(minimum / scale), round(maximum / scale))
-                control.setSingleStep(1)
-                control.setValue(round(value / scale))
-                value_label = QtWidgets.QLabel(f'{control.value() * scale:g}')
-                value_layout = QtWidgets.QHBoxLayout()
-                value_layout.setContentsMargins(0, 0, 0, 0)
-                value_layout.addWidget(control)
-                value_layout.addWidget(value_label)
-                control.valueChanged.connect(
-                    lambda slider_value, label=value_label, factor=scale:
-                    label.setText(f'{slider_value * factor:g}'))
-                control_widget = QtWidgets.QWidget()
-                control_widget.setLayout(value_layout)
-            else:
-                control = QtWidgets.QDoubleSpinBox()
-                control.setRange(minimum, maximum)
-                control.setSingleStep(step)
-                control.setDecimals(3 if step < 0.01 else (2 if step < 1 else 0))
-                control.setValue(value)
-                control_widget = control
+            control = QtWidgets.QDoubleSpinBox()
+            control.setRange(minimum, maximum)
+            control.setSingleStep(step)
+            control.setDecimals(3 if step < 0.01 else (2 if step < 1 else 0))
+            control.setValue(value)
+            control_widget = control
             controls[key] = control
             row = settings_row_offset + index // 2
             column = (index % 2) * 2
-            settings_layout.addWidget(QtWidgets.QLabel(title + ":"), row, column)
+            settings_layout.addWidget(
+                QtWidgets.QLabel(f'{title} (上限: {maximum:g}):'), row, column)
             settings_layout.addWidget(control_widget, row, column + 1)
 
         def apply_qt_settings():
             for key, control in controls.items():
-                value = control.value() * slider_scales.get(key, 1)
+                value = control.value()
                 if key in ('eye_offset_y', 'center_offset_y'):
                     value = -value
                 if key in ('eye_offset_x', 'eye_offset_y', 'center_offset_x',
@@ -3209,8 +3208,6 @@ class HijikimameApp:
             }
             for key, value in defaults.items():
                 value = -value if key in ('eye_offset_y', 'center_offset_y') else value
-                if key in slider_scales:
-                    value = round(value / slider_scales[key])
                 controls[key].setValue(value)
             for key, value in (('mouse_repulsion_enabled', True),
                                ('bean_repulsion_enabled', True),
@@ -3517,6 +3514,9 @@ class HijikimameApp:
             except:
                 self._last_throw_velocity = (0, 0)
             self.throw_cooldown = THROW_COOLDOWN_FRAMES
+            self._mouse_repulsion_ignore_until = (
+                time.monotonic() + MOUSE_REPULSION_THROW_GRACE_SECONDS)
+            self._mouse_repulsion_active = False
             self.remaining_bounces = self.settings.get('edge_bounce_count', EDGE_BOUNCE_COUNT_DEFAULT)
             self.drag_vx = 0; self.drag_vy = 0
             self.canvas.unbind("<B1-Motion>")
@@ -3613,7 +3613,9 @@ class HijikimameApp:
         is_mouse_over_char = (repulsion_enabled and
                               self.x - touch_margin <= mouse_x <= self.x + self.image_width + touch_margin and
                               self.y - touch_margin <= mouse_y <= self.y + self.image_height + touch_margin)
-        if is_mouse_over_char and mouse_speed >= 1:
+        mouse_repulsion_allowed = (
+            time.monotonic() >= self._mouse_repulsion_ignore_until)
+        if is_mouse_over_char and mouse_repulsion_allowed and mouse_speed >= 1:
             mouse_direction_x = mouse_vx / mouse_speed
             mouse_direction_y = mouse_vy / mouse_speed
             past_character_center = (
@@ -3622,8 +3624,8 @@ class HijikimameApp:
             )
             mouse_repulsion_contact = past_character_center >= MOUSE_REPULSION_OVERSHOOT
         else:
-            mouse_repulsion_contact = is_mouse_over_char
-        if not is_mouse_over_char:
+            mouse_repulsion_contact = is_mouse_over_char and mouse_repulsion_allowed
+        if not is_mouse_over_char or not mouse_repulsion_allowed:
             self._mouse_repulsion_active = False
         mouse_repulsion_started = (
             mouse_repulsion_contact and not self._mouse_repulsion_active
@@ -3644,6 +3646,9 @@ class HijikimameApp:
                     self.vx += mouse_ax * MOUSE_ACCELERATION_THROW_MULTIPLIER
                     self.vy += mouse_ay * MOUSE_ACCELERATION_THROW_MULTIPLIER
                     self.throw_cooldown = THROW_COOLDOWN_FRAMES
+                    self._mouse_repulsion_ignore_until = (
+                        time.monotonic() + MOUSE_REPULSION_THROW_GRACE_SECONDS)
+                    self._mouse_repulsion_active = False
                     self.remaining_bounces = self.settings.get('edge_bounce_count', EDGE_BOUNCE_COUNT_DEFAULT)
                     self._last_throw_velocity = (self.vx, self.vy)
             except Exception:
@@ -3659,7 +3664,8 @@ class HijikimameApp:
                     self.vy = (self.vy + dy_char * track_speed) * 0.85
 
             if repulsion_enabled and mouse_repulsion_started:
-                self._apply_mouse_repulsion(dx_char, dy_char, distance, mouse_speed)
+                self._apply_mouse_repulsion(
+                    dx_char, dy_char, distance, mouse_speed, mouse_vx, mouse_vy)
                 if self.throw_cooldown > 0:
                     self._last_throw_velocity = (self.vx, self.vy)
             if bool(self.settings.get('bean_repulsion_enabled', True)):
@@ -3760,32 +3766,50 @@ class HijikimameApp:
         }
 
     def _get_bean_peer_positions(self):
-        now = time.monotonic()
-        if self.is_additional_instance and now - self._last_bean_position_sync >= BEAN_POSITION_SYNC_INTERVAL / 1000:
-            self._last_bean_position_sync = now
+        if not self.is_additional_instance:
+            self._bean_positions = {
+                key: value for key, value in self._bean_positions.items()
+                if time.monotonic() - value['updated_at'] <= BEAN_POSITION_STALE_AFTER
+            }
+            return list(self._bean_positions.values())
+        with self._bean_peer_positions_lock:
+            if time.monotonic() - self._bean_peer_positions_updated_at > BEAN_POSITION_STALE_AFTER:
+                return []
+            return list(self._bean_peer_positions.values())
+
+    def _start_bean_position_sync(self):
+        thread = threading.Thread(target=self._bean_position_sync_loop, daemon=True)
+        thread.start()
+
+    def _bean_position_sync_loop(self):
+        while not self._bean_sync_stop.is_set():
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(0.1)
+                    s.settimeout(0.5)
                     s.connect((HOST, PORT))
                     request = b'BEAN_POSITION:' + json.dumps(
                         self._current_bean_position()
                     ).encode('utf-8')
                     s.sendall(request)
-                    response = s.recv(65536)
+                    response_parts = []
+                    while True:
+                        chunk = s.recv(65536)
+                        if not chunk:
+                            break
+                        response_parts.append(chunk)
+                response = b''.join(response_parts)
                 peers = json.loads(response.decode('utf-8'))
-                self._bean_peer_positions = {
-                    int(peer['id']): peer for peer in peers
+                peer_positions = {
+                    int(peer['id']): peer
+                    for peer in peers
+                    if isinstance(peer, dict) and 'id' in peer
                 }
+                with self._bean_peer_positions_lock:
+                    self._bean_peer_positions = peer_positions
+                    self._bean_peer_positions_updated_at = time.monotonic()
             except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError):
                 pass
-
-        if not self.is_additional_instance:
-            self._bean_positions = {
-                key: value for key, value in self._bean_positions.items()
-                if now - value['updated_at'] <= BEAN_POSITION_STALE_AFTER
-            }
-            return list(self._bean_positions.values())
-        return list(self._bean_peer_positions.values())
+            self._bean_sync_stop.wait(BEAN_POSITION_SYNC_INTERVAL / 1000)
 
     def _apply_bean_repulsion(self, peer_positions):
         if not bool(self.settings.get('bean_repulsion_enabled', True)):
@@ -3844,11 +3868,16 @@ class HijikimameApp:
                     ny = impact_y / impact_distance
 
             closing_speed = -(relative_vx * nx + relative_vy * ny)
-            if closing_speed > 0:
+            if overlap > 0:
+                overlap_speed = min(20.0, overlap * 0.25)
+                impulse = max(closing_speed, overlap_speed) * 0.9 * multiplier
+                self.vx += nx * impulse
+                self.vy += ny * impulse
+            elif closing_speed > 0:
                 impulse = closing_speed * 0.9 * multiplier
                 self.vx += nx * impulse
                 self.vy += ny * impulse
-            elif overlap == 0:
+            else:
                 continue
 
             if overlap > 0:
@@ -3856,9 +3885,14 @@ class HijikimameApp:
                 self.x += nx * separation
                 self.y += ny * separation
 
-    def _apply_mouse_repulsion(self, dx, dy, distance, mouse_speed):
+    def _apply_mouse_repulsion(self, dx, dy, distance, mouse_speed, mouse_vx, mouse_vy):
         force = max(20, mouse_speed * BOUNCE_STRENGTH, 80.0 / max(distance, 1.0))
-        if distance == 0:
+        if mouse_speed >= 1:
+            direction_x = mouse_vx / mouse_speed
+            direction_y = mouse_vy / mouse_speed
+            force_x = direction_x * force
+            force_y = direction_y * force
+        elif distance == 0:
             angle = random.uniform(0, 2 * math.pi)
             force_x = math.cos(angle) * force
             force_y = math.sin(angle) * force
@@ -3868,9 +3902,16 @@ class HijikimameApp:
 
         self.vx += force_x
         self.vy += force_y
+        if mouse_speed >= 1:
+            forward_speed = self.vx * direction_x + self.vy * direction_y
+            if forward_speed < force:
+                correction = force - forward_speed
+                self.vx += direction_x * correction
+                self.vy += direction_y * correction
 
     def start_exit_animation(self):
         if self.is_exiting: return 
+        self._bean_sync_stop.set()
         if not self.exit_frames:
             self.master.destroy(); return
         self.is_exiting = True

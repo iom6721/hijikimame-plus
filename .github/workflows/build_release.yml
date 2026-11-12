@@ -51,7 +51,7 @@ jobs:
           body: |
             Release ${{ github.ref_name }}
 
-            まだここには何も書かれていないようです:)
+            + ひじき豆の処理の最適化
           draft: false
           prerelease: false
           files: |
