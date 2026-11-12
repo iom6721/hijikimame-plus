@@ -528,7 +528,7 @@ PORT = 31500
 EXIT_COMMAND = b'ANIMATED_EXIT' 
 ADD_BEAN_COMMAND = b'ADD_HIJIKIMAME'
 CLIENT_TIMEOUT = 3.0 
-BEAN_POSITION_SYNC_INTERVAL = 100
+BEAN_POSITION_SYNC_INTERVAL = 30
 BEAN_POSITION_STALE_AFTER = 1.0
 
 # --- PyInstaller対応関数 ---
@@ -616,7 +616,7 @@ DEFAULT_EYE_COLOR = 'black'
 INVERTED_EYE_COLOR = 'white'
 
 # アプリバージョン（リリースタグと一致させてください）
-VERSION = "v2.5.0"
+VERSION = "v2.5.1"
 
 DISCORD_CLIENT_ID = "1507453857456721951"
 DISCORD_ACTIVITY_STATE = "※これは完全な身内ネタアプリケーションです。"
@@ -1702,7 +1702,7 @@ class HijikimameApp:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
             self.server_socket.bind((HOST, PORT))
-            self.server_socket.listen(1)
+            self.server_socket.listen(128)
             self.server_socket.setblocking(False) 
         except:
             self.master.destroy()
@@ -2598,7 +2598,6 @@ class HijikimameApp:
             tk.Button(top_btn_frame, text="場所選択", command=self.request_target_position_selection).pack(side='left', padx=5)
             tk.Button(top_btn_frame, text="画像追跡設定", command=self.choose_target_image).pack(side='left', padx=5)
             tk.Button(top_btn_frame, text="追尾解除", command=self.clear_target_tracking).pack(side='left', padx=5)
-            tk.Button(top_btn_frame, text="バージョンを確認する", command=self.open_version_window).pack(side='left', padx=5)
             tk.Button(top_btn_frame, text="設定読込", command=self.import_settings_from_file).pack(side='right', padx=5)
             tk.Button(top_btn_frame, text="設定出力", command=self.export_settings_to_file).pack(side='right', padx=5)
         except:
@@ -2705,6 +2704,7 @@ class HijikimameApp:
         self._refresh_custom_cosmetic_listbox()
 
         tk.Button(self._edit_frame, text='ひじき豆を増やす', command=self.add_hijikimame).pack(fill='x', padx=8, pady=2)
+        tk.Button(self._edit_frame, text='バージョンを確認する', command=self.open_version_window).pack(fill='x', padx=8, pady=2)
 
         adjust_frame = tk.LabelFrame(self._edit_frame, text='コスメティック調整')
         adjust_frame.pack(fill='both', padx=8, pady=5, expand=True)
@@ -2956,7 +2956,6 @@ class HijikimameApp:
             ("場所選択", self.request_target_position_selection),
             ("画像追跡設定", self.choose_target_image),
             ("追尾解除", self.clear_target_tracking),
-            ("バージョンを確認する", self.open_version_window),
         ):
             button = QtWidgets.QPushButton(title)
             button.clicked.connect(callback)
@@ -3055,6 +3054,9 @@ class HijikimameApp:
         add_bean_button = QtWidgets.QPushButton("ひじき豆を増やす")
         add_bean_button.clicked.connect(self.add_hijikimame)
         left_column.addWidget(add_bean_button)
+        version_button = QtWidgets.QPushButton("バージョンを確認する")
+        version_button.clicked.connect(self.open_version_window)
+        left_column.addWidget(version_button)
         left_column.addStretch(1)
 
         settings_group = QtWidgets.QGroupBox("設定")
@@ -3556,31 +3558,17 @@ class HijikimameApp:
             # if in throw cooldown, continue coasting with decay
             if self.throw_cooldown > 0:
                 self.throw_cooldown -= 1; self.vx *= 0.92; self.vy *= 0.92
-                self.x += self.vx; self.y += self.vy
-                if bool(self.settings.get('mouse_repulsion_enabled', True)):
-                    self._apply_bean_repulsion(peer_positions)
             else:
-                if repulsion_enabled and is_mouse_over_char:
-                    actual_bounce_force = max(20, mouse_speed * BOUNCE_STRENGTH, 80.0 / max(distance, 1.0))
-                    if distance != 0:
-                        nx = dx_char / distance
-                        ny = dy_char / distance
-                        self.vx = -nx * actual_bounce_force
-                        self.vy = -ny * actual_bounce_force
-                        push_back = max(self.image_width, self.image_height) * 0.25
-                        self.x -= nx * push_back
-                        self.y -= ny * push_back
-                    else:
-                        angle = random.uniform(0, 2 * math.pi)
-                        self.vx = math.cos(angle) * actual_bounce_force
-                        self.vy = math.sin(angle) * actual_bounce_force
-                else:
+                if not (repulsion_enabled and is_mouse_over_char):
                     track_speed = float(self.settings.get('tracking_speed', TRACKING_SPEED))
                     self.vx = (self.vx + dx_char * track_speed) * 0.85
                     self.vy = (self.vy + dy_char * track_speed) * 0.85
-                if bool(self.settings.get('mouse_repulsion_enabled', True)):
-                    self._apply_bean_repulsion(peer_positions)
-                self.x += self.vx; self.y += self.vy
+
+            if repulsion_enabled and is_mouse_over_char:
+                self._apply_mouse_repulsion(dx_char, dy_char, distance, mouse_speed)
+            if bool(self.settings.get('mouse_repulsion_enabled', True)):
+                self._apply_bean_repulsion(peer_positions)
+            self.x += self.vx; self.y += self.vy
 
         # remember last mouse velocity and position for next-frame accel calculation
         self._last_mouse_vx = mouse_vx
@@ -3718,27 +3706,78 @@ class HijikimameApp:
             dx = own_center_x - peer_x
             dy = own_center_y - peer_y
             distance = math.hypot(dx, dy)
-            if distance >= radius:
-                continue
+            relative_vx = self.vx - float(peer.get('vx', 0))
+            relative_vy = self.vy - float(peer.get('vy', 0))
+            overlap = max(0.0, radius - distance)
+
             if distance == 0:
                 peer_id = int(peer['id'])
-                angle = ((min(own_id, peer_id) * 31 + max(own_id, peer_id) * 17) % 360) * math.pi / 180
-                direction = 1 if own_id > peer_id else -1
-                nx = math.cos(angle) * direction
-                ny = math.sin(angle) * direction
+                relative_speed = math.hypot(relative_vx, relative_vy)
+                if relative_speed:
+                    nx = -relative_vx / relative_speed
+                    ny = -relative_vy / relative_speed
+                else:
+                    angle = ((min(own_id, peer_id) * 31 + max(own_id, peer_id) * 17) % 360) * math.pi / 180
+                    direction = 1 if own_id > peer_id else -1
+                    nx = math.cos(angle) * direction
+                    ny = math.sin(angle) * direction
             else:
                 nx = dx / distance
                 ny = dy / distance
-            overlap = radius - distance
-            relative_vx = self.vx - float(peer.get('vx', 0))
-            relative_vy = self.vy - float(peer.get('vy', 0))
-            relative_speed = math.hypot(relative_vx, relative_vy)
-            force = min(80.0, max(8.0, overlap * 0.25 + relative_speed * 0.75))
-            self.vx += nx * force
-            self.vy += ny * force
-            separation = min(overlap * 0.65, own_radius * 0.75)
-            self.x += nx * separation
-            self.y += ny * separation
+
+            if overlap == 0:
+                relative_speed_squared = relative_vx * relative_vx + relative_vy * relative_vy
+                if relative_speed_squared == 0:
+                    continue
+                offset_along_velocity = dx * relative_vx + dy * relative_vy
+                discriminant = offset_along_velocity ** 2 - relative_speed_squared * (dx * dx + dy * dy - radius * radius)
+                if offset_along_velocity >= 0 or discriminant < 0:
+                    continue
+                impact_time = (-offset_along_velocity - math.sqrt(discriminant)) / relative_speed_squared
+                if impact_time < 0 or impact_time > 1:
+                    continue
+                impact_x = dx + relative_vx * impact_time
+                impact_y = dy + relative_vy * impact_time
+                impact_distance = math.hypot(impact_x, impact_y)
+                if impact_distance == 0:
+                    nx = -relative_vx / math.sqrt(relative_speed_squared)
+                    ny = -relative_vy / math.sqrt(relative_speed_squared)
+                else:
+                    nx = impact_x / impact_distance
+                    ny = impact_y / impact_distance
+
+            closing_speed = -(relative_vx * nx + relative_vy * ny)
+            if closing_speed > 0:
+                impulse = closing_speed * 0.9
+                self.vx += nx * impulse
+                self.vy += ny * impulse
+            elif overlap == 0:
+                continue
+
+            if overlap > 0:
+                separation = min(overlap * 0.55, own_radius)
+                self.x += nx * separation
+                self.y += ny * separation
+
+    def _apply_mouse_repulsion(self, dx, dy, distance, mouse_speed):
+        force = max(20, mouse_speed * BOUNCE_STRENGTH, 80.0 / max(distance, 1.0))
+        if distance == 0:
+            angle = random.uniform(0, 2 * math.pi)
+            force_x = math.cos(angle) * force
+            force_y = math.sin(angle) * force
+        else:
+            force_x = -dx / distance * force
+            force_y = -dy / distance * force
+
+        current_speed = math.hypot(self.vx, self.vy)
+        self.vx += force_x
+        self.vy += force_y
+        combined_speed = math.hypot(self.vx, self.vy)
+        speed_limit = max(current_speed, force)
+        if combined_speed > speed_limit:
+            scale = speed_limit / combined_speed
+            self.vx *= scale
+            self.vy *= scale
 
     def start_exit_animation(self):
         if self.is_exiting: return 
