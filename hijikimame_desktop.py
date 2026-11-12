@@ -429,6 +429,19 @@ class _PySideRoot(QtWidgets.QWidget):
             self._canvas.setGeometry(self.rect())
 
 
+class _UpdateCheckDispatcher(QtCore.QObject):
+    completed = QtCore.Signal(object)
+
+    def __init__(self, parent, callback):
+        super().__init__(parent)
+        self._callback = callback
+        self.completed.connect(self._deliver)
+
+    @QtCore.Slot(object)
+    def _deliver(self, result):
+        self._callback(result)
+
+
 class _PySideTk:
     @staticmethod
     def _ensure_app():
@@ -603,7 +616,7 @@ DEFAULT_EYE_COLOR = 'black'
 INVERTED_EYE_COLOR = 'white'
 
 # アプリバージョン（リリースタグと一致させてください）
-VERSION = "v2.4.7"
+VERSION = "v2.5.0"
 
 DISCORD_CLIENT_ID = "1507453857456721951"
 DISCORD_ACTIVITY_STATE = "※これは完全な身内ネタアプリケーションです。"
@@ -959,15 +972,15 @@ class HijikimameApp:
         self._latest_update_sha_expected = None
         self._latest_update_script_url = None
         self._update_available = False
-        self._update_button = None
-        self._qt_update_button = None
+        self._version_dialog = None
+        self._version_status_label = None
+        self._version_update_button = None
         self.discord_presence = None
         self._discord_presence_retry_delay_ms = 30000
         self._discord_presence_retry_scheduled = False
         if self.is_additional_instance:
             self.master.after(1500, self._poll_settings_file)
         else:
-            self.master.after(500, self.start_update_check_thread)
             self.master.after(1000, self._cleanup_update_file)
             if self.settings.get('discord_presence_enabled', True):
                 self.start_discord_presence()
@@ -1148,20 +1161,17 @@ class HijikimameApp:
         return None
 
     def _refresh_update_button(self):
-        if self._update_button is not None:
+        if self._version_update_button is not None:
             try:
-                if self._update_available:
-                    if not self._update_button.winfo_ismapped():
-                        self._update_button.pack(side='right', padx=2)
+                if isinstance(self.master, _PySideRoot):
+                    self._version_update_button.setVisible(self._update_available)
+                elif self._update_available:
+                    if not self._version_update_button.winfo_ismapped():
+                        self._version_update_button.pack(side='right', padx=4)
                 else:
-                    self._update_button.pack_forget()
-            except Exception:
-                pass
-        if self._qt_update_button is not None:
-            try:
-                self._qt_update_button.setVisible(self._update_available)
-            except RuntimeError:
-                self._qt_update_button = None
+                    self._version_update_button.pack_forget()
+            except (AttributeError, RuntimeError, tk.TclError):
+                self._version_update_button = None
 
     def _perform_update(self):
         if not self._update_available:
@@ -1296,22 +1306,142 @@ class HijikimameApp:
             except Exception:
                 pass
 
-    def start_update_check_thread(self):
+    def start_update_check_thread(self, callback=None):
         try:
-            t = threading.Thread(target=self._check_and_initiate_update, daemon=True)
+            dispatcher = None
+            if callback is not None and isinstance(self.master, _PySideRoot):
+                dispatcher = _UpdateCheckDispatcher(self.master, callback)
+                self._update_check_dispatcher = dispatcher
+
+            def check():
+                try:
+                    result = self._check_and_initiate_update()
+                except Exception as exc:
+                    result = ('error', str(exc))
+                if callback is not None:
+                    if dispatcher is not None:
+                        dispatcher.completed.emit(result)
+                    else:
+                        self.master.after(0, lambda: callback(result))
+
+            t = threading.Thread(target=check, daemon=True)
             t.start()
-        except:
-            pass
+        except Exception as exc:
+            if callback is not None:
+                error = str(exc)
+                if dispatcher is not None:
+                    dispatcher.completed.emit(('error', error))
+                else:
+                    self.master.after(0, lambda: callback(('error', error)))
+
+    def open_version_window(self):
+        if isinstance(self.master, _PySideRoot):
+            dialog = self._version_dialog
+            if dialog is not None:
+                try:
+                    if dialog.isVisible():
+                        dialog.raise_()
+                        dialog.activateWindow()
+                        return
+                except RuntimeError:
+                    pass
+
+            dialog = QtWidgets.QDialog()
+            dialog.setWindowTitle("バージョンを確認する")
+            dialog.setWindowIcon(QtGui.QIcon(resource_path('hijikimame_desktop.ico')))
+            dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+            layout = QtWidgets.QVBoxLayout(dialog)
+            layout.addWidget(QtWidgets.QLabel(f"現在のバージョン: {VERSION}"))
+            self._version_status_label = QtWidgets.QLabel("GitHub から更新を確認しています...")
+            layout.addWidget(self._version_status_label)
+            buttons = QtWidgets.QHBoxLayout()
+            layout.addLayout(buttons)
+            buttons.addStretch(1)
+            update_button = QtWidgets.QPushButton("アップデートをする")
+            update_button.clicked.connect(self._perform_update)
+            update_button.setVisible(False)
+            buttons.addWidget(update_button)
+            close_button = QtWidgets.QPushButton("閉じる")
+            close_button.clicked.connect(dialog.close)
+            buttons.addWidget(close_button)
+            dialog.resize(380, 150)
+            self._version_dialog = dialog
+            self._version_update_button = update_button
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        else:
+            dialog = self._version_dialog
+            if dialog is not None:
+                try:
+                    if dialog.winfo_exists():
+                        dialog.lift()
+                        return
+                except Exception:
+                    pass
+
+            dialog = tk.Toplevel(self.master)
+            dialog.title("バージョンを確認する")
+            try:
+                dialog.iconbitmap(resource_path('hijikimame_desktop.ico'))
+            except Exception:
+                pass
+            dialog.attributes('-topmost', True)
+            self._version_dialog = dialog
+            tk.Label(dialog, text=f"現在のバージョン: {VERSION}").pack(padx=16, pady=(16, 8))
+            self._version_status_label = tk.Label(dialog, text="GitHub から更新を確認しています...")
+            self._version_status_label.pack(padx=16, pady=8)
+            button_frame = tk.Frame(dialog)
+            button_frame.pack(fill='x', padx=12, pady=12)
+            update_button = tk.Button(button_frame, text="アップデートをする", command=self._perform_update)
+            self._version_update_button = update_button
+            tk.Button(button_frame, text="閉じる", command=dialog.destroy).pack(side='right', padx=4)
+            dialog.geometry('380x150')
+            self._refresh_update_button()
+
+        self._update_available = False
+        self._latest_update_tag = None
+        self._latest_update_body = None
+        self._latest_update_download_url = None
+        self._latest_update_script_url = None
+        self._latest_update_sha_expected = None
+        if isinstance(self.master, _PySideRoot):
+            self._version_update_button.setVisible(False)
+        else:
+            self._version_update_button.pack_forget()
+        self.start_update_check_thread(
+            lambda result, active_dialog=dialog: self._on_version_check_complete(active_dialog, result)
+        )
+
+    def _on_version_check_complete(self, dialog, result):
+        if self._version_dialog is not dialog:
+            return
+        state, detail = result
+        if state == 'available':
+            text = f"新しいバージョン {detail} が見つかりました。"
+        elif state == 'latest':
+            text = "現在のバージョンは最新です。"
+        else:
+            text = f"更新を確認できませんでした。\n{detail}"
+        try:
+            if isinstance(self.master, _PySideRoot):
+                self._version_status_label.setText(text)
+            else:
+                self._version_status_label.config(text=text)
+        except (AttributeError, RuntimeError):
+            return
+        self._update_available = state == 'available'
+        self._refresh_update_button()
 
     def _check_and_initiate_update(self):
         if VERSION.startswith('Snapshot'):
-            return
+            return 'error', 'Snapshot 版では更新を確認できません。'
         if requests is None:
-            return
+            return 'error', 'requests が利用できません。'
         owner = os.environ.get('GITHUB_OWNER', GITHUB_DEFAULT_OWNER)
         repo = os.environ.get('GITHUB_REPO', GITHUB_DEFAULT_REPO)
         if not owner or not repo:
-            return
+            return 'error', 'GitHub リポジトリを設定できません。'
         token = os.environ.get('GITHUB_UPDATE_TOKEN') or os.environ.get('GITHUB_TOKEN')
         headers = {"Accept": "application/vnd.github.v3+json"}
         if token:
@@ -1319,12 +1449,15 @@ class HijikimameApp:
         try:
             resp = requests.get(f"https://api.github.com/repos/{owner}/{repo}/releases/latest", headers=headers, timeout=10)
             if resp.status_code != 200:
-                return
+                return 'error', f'GitHub API が HTTP {resp.status_code} を返しました。'
             rel = resp.json()
             tag = rel.get('tag_name')
             body = rel.get('body', '') or '更新内容はありません。'
-            if not tag or tag == VERSION:
-                return
+            if not tag:
+                return 'error', 'GitHub に最新リリースが見つかりません。'
+            self._latest_update_tag = tag
+            if tag == VERSION:
+                return 'latest', tag
             self._latest_update_tag = tag
             self._latest_update_body = body
             self._latest_update_script_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{tag}/hijikimame_desktop.py"
@@ -1366,10 +1499,9 @@ class HijikimameApp:
                 self._latest_update_asset_name = None
             self._latest_update_sha_expected = sha_expected
             self._update_available = True
-            self.master.after(0, self._refresh_update_button)
-            return
-        except Exception:
-            return
+            return 'available', tag
+        except Exception as exc:
+            return 'error', str(exc)
 
     def start_discord_presence(self):
         if not self.settings.get('discord_presence_enabled', True):
@@ -2466,6 +2598,7 @@ class HijikimameApp:
             tk.Button(top_btn_frame, text="場所選択", command=self.request_target_position_selection).pack(side='left', padx=5)
             tk.Button(top_btn_frame, text="画像追跡設定", command=self.choose_target_image).pack(side='left', padx=5)
             tk.Button(top_btn_frame, text="追尾解除", command=self.clear_target_tracking).pack(side='left', padx=5)
+            tk.Button(top_btn_frame, text="バージョンを確認する", command=self.open_version_window).pack(side='left', padx=5)
             tk.Button(top_btn_frame, text="設定読込", command=self.import_settings_from_file).pack(side='right', padx=5)
             tk.Button(top_btn_frame, text="設定出力", command=self.export_settings_to_file).pack(side='right', padx=5)
         except:
@@ -2784,9 +2917,6 @@ class HijikimameApp:
         # ボタンを下に配置
         tk.Button(bottom_frame, text="初期化", command=reset_settings).pack(side='left', padx=2)
         tk.Button(bottom_frame, text="適用", command=apply_settings).pack(side='left', padx=2)
-        self._update_button = tk.Button(bottom_frame, text="最新バージョンに揃える", bg="#8fbc8f", command=self._perform_update)
-        if self._update_available:
-            self._update_button.pack(side='right', padx=2)
         tk.Button(bottom_frame, text="閉じる", command=self._edit_win.destroy).pack(side='right', padx=2)
         tk.Button(bottom_frame, text="全て閉じる", bg="#ffcccb", command=self.close_all_instances).pack(side='right', padx=2)
 
@@ -2826,6 +2956,7 @@ class HijikimameApp:
             ("場所選択", self.request_target_position_selection),
             ("画像追跡設定", self.choose_target_image),
             ("追尾解除", self.clear_target_tracking),
+            ("バージョンを確認する", self.open_version_window),
         ):
             button = QtWidgets.QPushButton(title)
             button.clicked.connect(callback)
@@ -3036,11 +3167,6 @@ class HijikimameApp:
         close_all_button = QtWidgets.QPushButton("全て閉じる")
         close_all_button.clicked.connect(self.close_all_instances)
         buttons.addWidget(close_all_button)
-        update_button = QtWidgets.QPushButton("最新バージョンに揃える")
-        update_button.clicked.connect(self._perform_update)
-        buttons.addWidget(update_button)
-        self._qt_update_button = update_button
-        self._refresh_update_button()
         buttons.addStretch(1)
         apply_button = QtWidgets.QPushButton("適用")
         apply_button.clicked.connect(apply_qt_settings)
@@ -3545,6 +3671,8 @@ class HijikimameApp:
             'y': self.y,
             'width': self.image_width,
             'height': self.image_height,
+            'vx': self.vx,
+            'vy': self.vy,
         }
 
     def _get_bean_peer_positions(self):
@@ -3602,10 +3730,13 @@ class HijikimameApp:
                 nx = dx / distance
                 ny = dy / distance
             overlap = radius - distance
-            force = max(2.0, overlap * 0.35)
+            relative_vx = self.vx - float(peer.get('vx', 0))
+            relative_vy = self.vy - float(peer.get('vy', 0))
+            relative_speed = math.hypot(relative_vx, relative_vy)
+            force = min(80.0, max(8.0, overlap * 0.25 + relative_speed * 0.75))
             self.vx += nx * force
             self.vy += ny * force
-            separation = min(overlap * 0.15, max(self.image_width, self.image_height) * 0.15)
+            separation = min(overlap * 0.65, own_radius * 0.75)
             self.x += nx * separation
             self.y += ny * separation
 
