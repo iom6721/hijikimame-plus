@@ -51,7 +51,7 @@ jobs:
           body: |
             Release ${{ github.ref_name }}
 
-            + ひじき豆の反発対象を増やしました。
+            まだここには何も書かれていないようです:(
           draft: false
           prerelease: false
           files: |
