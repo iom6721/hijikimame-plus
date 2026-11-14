@@ -22,8 +22,6 @@ a = Analysis(
         'pypresence.presence',
         'pypresence.types',
         'pypresence.utils',
-        'cv2',
-        'numpy',
     ],
     hookspath=[],
     hooksconfig={},

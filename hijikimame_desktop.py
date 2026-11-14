@@ -3,7 +3,7 @@ import sys
 if sys.platform.startswith('linux') and not os.environ.get('DISPLAY') and not os.environ.get('WAYLAND_DISPLAY') and not os.environ.get('QT_QPA_PLATFORM'):
     os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 from PySide6 import QtCore, QtGui, QtWidgets
-from PIL import Image, ImageGrab, ImageChops, ImageDraw
+from PIL import Image
 import collections
 
 
@@ -522,26 +522,6 @@ else:
     Presence = None
     pypresence_import_error = None
 
-cv2 = None
-np = None
-CV2_AVAILABLE = False
-
-
-def _load_cv2():
-    global cv2, np, CV2_AVAILABLE
-    if CV2_AVAILABLE:
-        return True
-    try:
-        import cv2 as cv2_module
-        import numpy as np_module
-    except Exception:
-        return False
-    cv2 = cv2_module
-    np = np_module
-    CV2_AVAILABLE = True
-    return True
-
-
 def _load_requests():
     global requests
     if requests is not None:
@@ -579,8 +559,10 @@ EXIT_COMMAND = b'ANIMATED_EXIT'
 ADD_BEAN_COMMAND = b'ADD_HIJIKIMAME'
 CLIENT_TIMEOUT = 3.0 
 BEAN_POSITION_SYNC_INTERVAL = 30
+BEAN_MAX_UPDATE_INTERVAL = 100
 BEAN_POSITION_STALE_AFTER = 1.0
 MOUSE_REPULSION_THROW_GRACE_SECONDS = 1.0
+DISCORD_DEBUG_LOG_MAX_CHARS = 10000
 
 # --- PyInstaller対応関数 ---
 GITHUB_DEFAULT_OWNER = "iom6721"
@@ -880,10 +862,7 @@ class HijikimameApp:
             'show_cosmetic_warning': True,
             'character_scale': 100.0,
             'eye_radius': 100.0,
-            'image_tracking_force_fullscreen': False,
-            'image_tracking_min_match_score': 0.6,
             'eye_movement_limit': EYE_MOVEMENT_LIMIT,
-            'image_tracking_interval': 1.0,
             'discord_presence_enabled': True,
         }
 
@@ -896,6 +875,7 @@ class HijikimameApp:
                         self.settings.get('mouse_repulsion_enabled', True))
         except:
             pass
+        self._discard_legacy_tracking_settings()
 
         self.nijiki_cache = collections.OrderedDict()
         self.nijiki_frame_index = 0
@@ -910,22 +890,13 @@ class HijikimameApp:
         self.current_mode = 0 
         self.is_inverted = False
         self.target_position = None
-        self.target_image_path = None
-        self.target_image_template = None
-        self.target_image_last_search = 0.0
-        self._target_image_search_in_progress = False
-        self._target_image_search_requested = False
-        self._target_image_lost = False
         self.settings.setdefault('eye_offset_x', EYE_OFFSET_X)
         self.settings.setdefault('eye_offset_y', EYE_OFFSET_Y)
         self.settings.setdefault('center_offset_x', CENTER_OFFSET_X)
         self.settings.setdefault('center_offset_y', CENTER_OFFSET_Y)
         self.settings.setdefault('character_scale', 100.0)
         self.settings.setdefault('eye_radius', 100.0)
-        self.settings.setdefault('image_tracking_min_match_score', 0.6)
         self.settings.setdefault('eye_movement_limit', EYE_MOVEMENT_LIMIT)
-        self.settings.setdefault('image_tracking_interval', 1.0)
-        self.settings.setdefault('image_tracking_force_fullscreen', False)
         self._normalize_custom_cosmetics()
 
         if isinstance(self.settings.get('target_position'), list) and len(self.settings.get('target_position')) == 2:
@@ -933,18 +904,6 @@ class HijikimameApp:
                 self.target_position = (int(self.settings['target_position'][0]), int(self.settings['target_position'][1]))
             except:
                 self.target_position = None
-        if self.settings.get('target_image_path'):
-            self.target_image_path = self.settings.get('target_image_path')
-            try:
-                self.target_image_template = self.load_image(self.target_image_path)
-            except:
-                self.target_image_template = None
-            if self.target_image_template is None:
-                self.target_image_path = None
-                self.settings['target_image_path'] = None
-                if int(self.settings.get('tracking_target_mode', 0)) == 2:
-                    self.settings['tracking_target_mode'] = 0
-
         self.original_image_path = resource_path("hijikimame_body.png") 
         self.original_image = self.load_image(self.original_image_path)
         self.takoyaki_image_path = resource_path(TAKOYAKI_IMAGE_PATH)
@@ -1608,10 +1567,21 @@ class HijikimameApp:
     def _log_discord_debug(self, where, trace):
         try:
             path = os.path.join(tempfile.gettempdir(), 'hijikimame_discord.log')
-            with open(path, 'a', encoding='utf-8') as f:
-                f.write(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {where}\n')
-                f.write(trace)
-                f.write('\n')
+            entry = f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {where}\n{trace}\n'
+            try:
+                log_file = open(path, 'r+b')
+            except FileNotFoundError:
+                log_file = open(path, 'w+b')
+            with log_file as f:
+                f.seek(0, os.SEEK_END)
+                f.write(entry.encode('utf-8'))
+                f.flush()
+                f.seek(max(0, f.tell() - (DISCORD_DEBUG_LOG_MAX_CHARS * 4 + 4)))
+                text = f.read().decode('utf-8', errors='ignore')
+                text = text[-DISCORD_DEBUG_LOG_MAX_CHARS:]
+                f.seek(0)
+                f.write(text.encode('utf-8'))
+                f.truncate()
         except Exception:
             pass
 
@@ -2119,12 +2089,25 @@ class HijikimameApp:
             except:
                 pass
 
+    def _discard_legacy_tracking_settings(self):
+        for key in (
+            'target_image_path',
+            'image_tracking_force_fullscreen',
+            'image_tracking_min_match_score',
+            'image_tracking_interval',
+        ):
+            self.settings.pop(key, None)
+        try:
+            if int(self.settings.get('tracking_target_mode', 0)) == 2:
+                self.settings['tracking_target_mode'] = 0
+                self.settings['target_position'] = None
+        except (TypeError, ValueError):
+            self.settings['tracking_target_mode'] = 0
+
     def _get_tracking_target_mode_display(self):
         mode = int(self.settings.get('tracking_target_mode', 0))
         if mode == 1:
             return '追尾先: 指定位置'
-        if mode == 2:
-            return '追尾先: 画像'
         return '追尾先: マウス'
 
     def _get_target_status_text(self):
@@ -2133,11 +2116,6 @@ class HijikimameApp:
             if self.target_position:
                 return f'選択位置: {self.target_position[0]}, {self.target_position[1]}'
             return '選択位置: なし'
-        if mode == 2:
-            label = f'画像: {os.path.basename(self.target_image_path)}' if self.target_image_path else '画像: なし'
-            if self.target_position:
-                label += f' (現在: {self.target_position[0]}, {self.target_position[1]})'
-            return label
         return 'マウス位置を追尾します'
 
     def _update_target_status_labels(self):
@@ -2238,394 +2216,11 @@ class HijikimameApp:
         except:
             pass
 
-    def choose_target_image(self):
-        try:
-            filename = filedialog.askopenfilename(parent=self.master, title='追跡する画像を選択', filetypes=[('画像ファイル', '*.png;*.jpg;*.jpeg;*.bmp;*.gif'), ('すべて', '*.*')])
-            if not filename:
-                return
-            template = self.load_image(filename)
-            if template is None:
-                raise Exception('invalid image')
-            self.target_image_template = template
-            self.target_image_path = filename
-            self.settings['target_image_path'] = filename
-            self.settings['tracking_target_mode'] = 2
-            self.settings['target_position'] = None
-            self.target_position = None
-            self.target_image_last_search = 0.0
-            self._search_target_image_on_screen(force=True)
-            self._update_target_status_labels()
-            self.save_settings_file()
-            self.broadcast_settings()
-        except Exception:
-            try:
-                messagebox.showerror('画像選択エラー', '指定したファイルを読み込めませんでした。')
-            except:
-                pass
-
-    def _grab_screen(self):
-        try:
-            if ImageGrab is None:
-                return None
-            # Temporarily hide canvas items (character + eyes) so they don't occlude the desktop
-            hidden_items = []
-            try:
-                if hasattr(self, 'canvas'):
-                    for item in self.canvas.find_all():
-                        try:
-                            prev = self.canvas.itemcget(item, 'state')
-                        except:
-                            prev = None
-                        try:
-                            self.canvas.itemconfigure(item, state='hidden')
-                            hidden_items.append((item, prev))
-                        except:
-                            pass
-                    try:
-                        self.master.update()
-                        time.sleep(0.02)
-                    except:
-                        pass
-            except:
-                hidden_items = []
-
-            try:
-                screen = ImageGrab.grab()
-            finally:
-                # restore previously-hidden items
-                try:
-                    for item, prev in hidden_items:
-                        try:
-                            if prev and prev != '':
-                                self.canvas.itemconfigure(item, state=prev)
-                            else:
-                                self.canvas.itemconfigure(item, state='normal')
-                        except:
-                            pass
-                    try:
-                        self.master.update()
-                    except:
-                        pass
-                except:
-                    pass
-
-            try:
-                x = self.master.winfo_rootx()
-                y = self.master.winfo_rooty()
-                w = self.master.winfo_width()
-                h = self.master.winfo_height()
-                if w > 0 and h > 0:
-                    if getattr(self, 'current_display_image', None) is not None and self.current_display_image.mode == 'RGBA':
-                        mask = self.current_display_image.split()[3]
-                        if mask.size == (w, h):
-                            screen.paste((255, 0, 255), (x, y), mask)
-                        else:
-                            draw = ImageDraw.Draw(screen)
-                            draw.rectangle([x, y, x + w, y + h], fill=(255, 0, 255))
-                    else:
-                        draw = ImageDraw.Draw(screen)
-                        draw.rectangle([x, y, x + w, y + h], fill=(255, 0, 255))
-            except:
-                pass
-            return screen
-        except:
-            return None
-
-    def _find_template_on_screen_cv(self, screen, template, region=None):
-        """OpenCVベースの高速テンプレートマッチ。画面とテンプレートは PIL Image。
-        戻り値: (center_x, center_y, score) または None
-        """
-        if not _load_cv2():
-            return None
-        try:
-            # Crop to region if provided (region: (x,y,w,h))
-            region_offset_x = 0
-            region_offset_y = 0
-            proc_screen = screen
-            if region is not None:
-                rx, ry, rw, rh = region
-                proc_screen = screen.crop((rx, ry, rx + rw, ry + rh))
-                region_offset_x = rx
-                region_offset_y = ry
-
-            # Convert to color BGR numpy arrays for OpenCV (no grayscale choice)
-            screen_np = np.array(proc_screen.convert('RGB'))
-            template_np = np.array(template.convert('RGB'))
-            # Convert RGB->BGR for OpenCV
-            screen_bgr = cv2.cvtColor(screen_np, cv2.COLOR_RGB2BGR)
-            template_bgr = cv2.cvtColor(template_np, cv2.COLOR_RGB2BGR)
-
-            sh, sw = screen_bgr.shape[:2]
-            th, tw = template_bgr.shape[:2]
-            if tw > sw or th > sh:
-                return None
-
-            best_score = -1.0
-            best_loc = None
-            best_size = (tw, th)
-
-            # Try a limited set of scales around 1.0 for speed and robustness
-            scales = [1.0, 0.9, 1.1, 0.8, 1.25]
-            screen_bgr_f = screen_bgr.astype(np.float32)
-            for scale in scales:
-                rw_t = max(6, int(tw * scale))
-                rh_t = max(6, int(th * scale))
-                if rw_t > sw or rh_t > sh:
-                    continue
-                try:
-                    tmpl_resized = cv2.resize(template_bgr, (rw_t, rh_t), interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR)
-                    tmpl_resized_f = tmpl_resized.astype(np.float32)
-                except Exception:
-                    continue
-                try:
-                    res = cv2.matchTemplate(screen_bgr_f, tmpl_resized_f, cv2.TM_CCOEFF_NORMED)
-                except Exception:
-                    continue
-                _, max_val, _, max_loc = cv2.minMaxLoc(res)
-                if max_val > best_score:
-                    best_score = float(max_val)
-                    best_loc = max_loc
-                    best_size = (rw_t, rh_t)
-
-            if best_loc is None:
-                return None
-
-            min_score = float(self.settings.get('image_tracking_min_match_score', 0.6))
-            if best_score < min_score:
-                return None
-
-            bx, by = best_loc
-            bw, bh = best_size
-            center_x = int(region_offset_x + bx + bw / 2)
-            center_y = int(region_offset_y + by + bh / 2)
-            return (center_x, center_y, best_score)
-        except Exception:
-            return None
-
-    def _search_target_image_on_screen(self, force=False):
-        if self.target_image_template is None:
-            return
-        now = time.time()
-        tracking_interval = float(self.settings.get('image_tracking_interval', 1.0))
-        if not force and now - self.target_image_last_search < tracking_interval:
-            return
-        if self._target_image_search_in_progress:
-            self._target_image_search_requested = True
-            return
-        self._target_image_search_requested = False
-        self._target_image_search_in_progress = True
-        self.target_image_last_search = now
-        template = self.target_image_template.copy()
-        def worker():
-            result = None
-            try:
-                # Enforce OpenCV-only tracking for speed and accuracy.
-                if not _load_cv2():
-                    result = None
-                    def _notify_no_cv():
-                        try:
-                            messagebox.showwarning('画像追跡エラー', 'OpenCV が必要です。OpenCV をインストールしてください。')
-                        except:
-                            pass
-                        try:
-                            self.settings['tracking_target_mode'] = 0
-                            self.save_settings_file()
-                            self.broadcast_settings()
-                            self._update_target_status_labels()
-                        except:
-                            pass
-                    try:
-                        self.master.after(0, _notify_no_cv)
-                    except:
-                        pass
-                else:
-                    screen = self._grab_screen()
-                    if screen is not None:
-                        # Save debug captures for analysis
-                        try:
-                            dbg_ts = int(time.time() * 1000)
-                            dbg_dir = os.path.join(tempfile.gettempdir(), 'hijikimame_debug')
-                            try:
-                                os.makedirs(dbg_dir, exist_ok=True)
-                            except:
-                                pass
-                            full_path = os.path.join(dbg_dir, f'dbg_{dbg_ts}_full.png')
-                            try:
-                                screen.save(full_path)
-                                print('DEBUG: saved full screen ->', full_path)
-                            except Exception:
-                                pass
-                            tmpl_path = os.path.join(dbg_dir, f'dbg_{dbg_ts}_template.png')
-                            try:
-                                template.save(tmpl_path)
-                                print('DEBUG: saved template ->', tmpl_path)
-                            except Exception:
-                                pass
-                            if region is not None:
-                                try:
-                                    rx, ry, rw, rh = region
-                                    region_img = screen.crop((rx, ry, rx + rw, ry + rh))
-                                    region_path = os.path.join(dbg_dir, f'dbg_{dbg_ts}_region.png')
-                                    region_img.save(region_path)
-                                    print('DEBUG: saved region ->', region_path)
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-                        # If configured, force full-screen search; otherwise prioritize nearby region
-                        force_fullscreen = bool(self.settings.get('image_tracking_force_fullscreen', False))
-                        region = None
-                        if not force_fullscreen and self.target_position:
-                            px, py = self.target_position
-                            region_size = 600
-                            region = (
-                                max(0, int(px - region_size // 2)),
-                                max(0, int(py - region_size // 2)),
-                                region_size,
-                                region_size
-                            )
-                        # First try region-based CV search for speed
-                        res_cv = self._find_template_on_screen_cv(screen, template, region=region)
-                        result = res_cv
-                        # If not found in region, try full-screen CV search
-                        if result is None and region is not None:
-                            result = self._find_template_on_screen_cv(screen, template, region=None)
-            except:
-                result = None
-            try:
-                self.master.after(0, lambda: self._finish_target_image_search(result))
-            except:
-                self._target_image_search_in_progress = False
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _finish_target_image_search(self, result):
-        self._target_image_search_in_progress = False
-        if self.settings.get('tracking_target_mode') != 2 or self.target_image_path != self.settings.get('target_image_path'):
-            if self._target_image_search_requested:
-                self._target_image_search_requested = False
-            return
-        had_previous_position = self.target_position is not None
-        if result:
-            x, y, score = result
-            self.target_position = (x, y)
-            self.settings['target_position'] = [x, y]
-            self._target_image_lost = False
-        else:
-            if had_previous_position:
-                # Keep the last known location and stay in place until the target is found again.
-                self._target_image_lost = True
-            else:
-                self.target_position = None
-                self.settings['target_position'] = None
-                self._target_image_lost = False
-        self._update_target_status_labels()
-        if self._target_image_search_requested:
-            self._target_image_search_requested = False
-            self._search_target_image_on_screen(force=True)
-
-    def _find_template_on_screen(self, screen, template):
-        try:
-            # Always operate in RGB (color) for fallback; no grayscale option
-            screen_proc_full = screen.convert('RGB')
-            screen_proc = screen_proc_full
-            template_proc = template.convert('RGB')
-            sw, sh = screen_proc.size
-            tw, th = template_proc.size
-            if tw > sw or th > sh:
-                return None
-            scale = 1.0
-            if sw > 800 or sh > 800:
-                scale = max(sw / 800.0, sh / 800.0)
-                screen_proc = screen_proc.resize((max(1, int(sw / scale)), max(1, int(sh / scale))), Image.LANCZOS)
-                template_proc = template_proc.resize((max(1, int(tw / scale)), max(1, int(th / scale))), Image.LANCZOS)
-            tw2, th2 = template_proc.size
-            if tw2 < 8 or th2 < 8:
-                return None
-            step = max(1, min(4, max(1, tw2 // 16), max(1, th2 // 16)))
-            small_template = template_proc.resize((64, 64), Image.LANCZOS)
-            best_score = None
-            best_xy = None
-            for y in range(0, screen_proc.height - th2 + 1, step):
-                for x in range(0, screen_proc.width - tw2 + 1, step):
-                    patch = screen_proc.crop((x, y, x + tw2, y + th2)).resize((64, 64), Image.LANCZOS)
-                    diff = ImageChops.difference(patch, small_template)
-                    # color diff: sum of channel sums
-                    score = sum(sum(px) for px in diff.getdata())
-                    if best_score is None or score < best_score:
-                        best_score = score
-                        best_xy = (x, y)
-            if best_xy is None:
-                return None
-
-            bx, by = best_xy
-            refine_radius = max(8, step * 2)
-            refined_score = best_score
-            for y in range(max(0, by - refine_radius), min(screen_proc.height - th2, by + refine_radius) + 1):
-                for x in range(max(0, bx - refine_radius), min(screen_proc.width - tw2, bx + refine_radius) + 1):
-                    patch = screen_proc.crop((x, y, x + tw2, y + th2)).resize((64, 64), Image.LANCZOS)
-                    diff = ImageChops.difference(patch, small_template)
-                    score = sum(sum(px) for px in diff.getdata())
-                    if score < refined_score:
-                        refined_score = score
-                        bx, by = x, y
-
-            if scale > 1.0:
-                orig_bx = min(sw - tw, int(bx * scale))
-                orig_by = min(sh - th, int(by * scale))
-                final_score = refined_score
-                final_bx = orig_bx
-                final_by = orig_by
-                full_radius = max(16, int(scale * step * 2), 32)
-                step2 = max(1, min(2, full_radius // 4))
-                for y in range(max(0, orig_by - full_radius), min(sh - th, orig_by + full_radius) + 1, step2):
-                    for x in range(max(0, orig_bx - full_radius), min(sw - tw, orig_bx + full_radius) + 1, step2):
-                        patch = screen_proc_full.crop((x, y, x + tw, y + th)).resize((64, 64), Image.LANCZOS)
-                        diff = ImageChops.difference(patch, small_template)
-                        score = sum(sum(px) for px in diff.getdata())
-                        if score < final_score:
-                            final_score = score
-                            final_bx = x
-                            final_by = y
-                bx, by = final_bx, final_by
-                refined_score = final_score
-
-            return int(bx + tw / 2), int(by + th / 2), refined_score
-        except:
-            return None
-
-    def toggle_tracking_target_mode(self):
-        try:
-            mode = int(self.settings.get('tracking_target_mode', 0))
-            for _ in range(3):
-                mode = (mode + 1) % 3
-                if mode == 1 and self.target_position is None:
-                    continue
-                if mode == 2 and self.target_image_template is None:
-                    continue
-                break
-            if mode == 2 and self.target_image_template is None:
-                mode = 0
-            self.settings['tracking_target_mode'] = mode
-            if mode == 2:
-                self._search_target_image_on_screen(force=True)
-            if mode == 0:
-                self.settings['target_position'] = None
-                self.target_position = None
-            self._update_target_status_labels()
-            self.save_settings_file()
-            self.broadcast_settings()
-        except:
-            pass
-
     def clear_target_tracking(self):
         try:
             self.settings['tracking_target_mode'] = 0
             self.settings['target_position'] = None
-            self.settings['target_image_path'] = None
             self.target_position = None
-            self.target_image_path = None
-            self.target_image_template = None
-            self._target_image_search_in_progress = False
             self._update_target_status_labels()
             self.save_settings_file()
             self.broadcast_settings()
@@ -2658,7 +2253,6 @@ class HijikimameApp:
             top_btn_frame.pack(fill='x', pady=5)
             tk.Button(top_btn_frame, text="キャラ切替", command=self.toggle_mode).pack(side='left', padx=5)
             tk.Button(top_btn_frame, text="場所選択", command=self.request_target_position_selection).pack(side='left', padx=5)
-            tk.Button(top_btn_frame, text="画像追跡設定", command=self.choose_target_image).pack(side='left', padx=5)
             tk.Button(top_btn_frame, text="追尾解除", command=self.clear_target_tracking).pack(side='left', padx=5)
             tk.Button(top_btn_frame, text="設定読込", command=self.import_settings_from_file).pack(side='right', padx=5)
             tk.Button(top_btn_frame, text="設定出力", command=self.export_settings_to_file).pack(side='right', padx=5)
@@ -2838,19 +2432,6 @@ class HijikimameApp:
         self.max_throw_scale.set(self.settings.get('max_throw_multiplier', 15))
         self.max_throw_scale.pack(fill='x', padx=8)
 
-        tk.Label(self._edit_frame, text="画像追尾間隔 (秒):").pack(anchor='w', padx=8)
-        self.image_tracking_scale = tk.Scale(self._edit_frame, from_=0.0, to=2.0, resolution=0.1, orient='horizontal')
-        self.image_tracking_scale.set(self.settings.get('image_tracking_interval', 1.0))
-        self.image_tracking_scale.pack(fill='x', padx=8)
-        fullscreen_var = tk.IntVar(value=1 if self.settings.get('image_tracking_force_fullscreen', False) else 0)
-        self.fullscreen_var = fullscreen_var
-        fullscreen_cb = tk.Checkbutton(self._edit_frame, text="軽量化: 全画面追尾を常に行う", variable=fullscreen_var)
-        fullscreen_cb.pack(anchor='w', padx=8, pady=2)
-        tk.Label(self._edit_frame, text="軽量化: 追尾受理最低スコア:").pack(anchor='w', padx=8)
-        self.image_tracking_score_scale = tk.Scale(self._edit_frame, from_=0.0, to=1.0, resolution=0.01, orient='horizontal')
-        self.image_tracking_score_scale.set(self.settings.get('image_tracking_min_match_score', 0.6))
-        self.image_tracking_score_scale.pack(fill='x', padx=8, pady=(0,8))
-
         tk.Label(self._edit_frame, text="画面端バウンド回数:").pack(anchor='w', padx=8)
         self.bounce_scale = tk.Scale(self._edit_frame, from_=0, to=20, orient='horizontal')
         self.bounce_scale.set(self.settings.get('edge_bounce_count', EDGE_BOUNCE_COUNT_DEFAULT))
@@ -2898,15 +2479,6 @@ class HijikimameApp:
                 self.settings['eye_movement_limit'] = float(self.eye_movement_scale.get())
             except:
                 self.settings['eye_movement_limit'] = EYE_MOVEMENT_LIMIT
-            try:
-                self.settings['image_tracking_interval'] = float(self.image_tracking_scale.get())
-            except:
-                self.settings['image_tracking_interval'] = 1.0
-            self.settings['image_tracking_force_fullscreen'] = bool(fullscreen_var.get())
-            try:
-                self.settings['image_tracking_min_match_score'] = float(self.image_tracking_score_scale.get())
-            except:
-                self.settings['image_tracking_min_match_score'] = 0.6
             if not self.is_dragging_stop and self.throw_cooldown == 0:
                 self.remaining_bounces = self.settings.get('edge_bounce_count', EDGE_BOUNCE_COUNT_DEFAULT)
             try:
@@ -2948,7 +2520,6 @@ class HijikimameApp:
             self.settings['selected_mode'] = 0
             self.settings['tracking_target_mode'] = 0
             self.settings['target_position'] = None
-            self.settings['target_image_path'] = None
             self.settings['custom_cosmetics'] = []
             self.settings['eye_offset_x'] = EYE_OFFSET_X
             self.settings['eye_offset_y'] = EYE_OFFSET_Y
@@ -2957,14 +2528,7 @@ class HijikimameApp:
             self.settings['character_scale'] = 100.0
             self.settings['eye_radius'] = 100.0
             self.settings['eye_movement_limit'] = EYE_MOVEMENT_LIMIT
-            self.settings['image_tracking_interval'] = 1.0
-            self.settings['image_tracking_force_fullscreen'] = False
-            self.settings['image_tracking_min_match_score'] = 0.6
             self.target_position = None
-            self.target_image_path = None
-            self.target_image_template = None
-            self.target_image_last_search = 0.0
-            self._target_image_search_in_progress = False
             self.current_mode = 0
             self.nijiki_scale.set(NIJIKI_DEFAULT_FPS)
             self.tracking_scale.set(TRACKING_SPEED)
@@ -2978,7 +2542,6 @@ class HijikimameApp:
             self.bean_repulsion_multiplier_scale.set(1.0)
             show_warning_var.set(1)
             boundary_mode_var.set('bounce')
-            fullscreen_var.set(0)
             # スライダー側の表示値は Y を反転しているので注意
             self.eye_x_scale.set(EYE_OFFSET_X)
             self.eye_y_scale.set(-EYE_OFFSET_Y)
@@ -2987,8 +2550,6 @@ class HijikimameApp:
             self.char_scale.set(100.0)
             self.eye_size_scale.set(100.0)
             self.eye_movement_scale.set(EYE_MOVEMENT_LIMIT)
-            self.image_tracking_scale.set(1.0)
-            self.image_tracking_score_scale.set(0.6)
             try:
                 self._refresh_character_buttons()
             except:
@@ -3041,7 +2602,6 @@ class HijikimameApp:
         for title, callback in (
             ("キャラ切替", self.toggle_mode),
             ("場所選択", self.request_target_position_selection),
-            ("画像追跡設定", self.choose_target_image),
             ("追尾解除", self.clear_target_tracking),
         ):
             button = QtWidgets.QPushButton(title)
@@ -3154,7 +2714,6 @@ class HijikimameApp:
             ('mouse_repulsion_enabled', "ひじき豆の反発", True),
             ('bean_repulsion_enabled', "ひじき豆同士の反発", True),
             ('show_cosmetic_warning', "コスメ追加時の警告を表示する", True),
-            ('image_tracking_force_fullscreen', "軽量化: 全画面追尾を常に行う", False),
             ('discord_presence_enabled', "Discord連携を有効にする", True),
         )
         for row, (key, title, default) in enumerate(checkbox_specs):
@@ -3184,8 +2743,6 @@ class HijikimameApp:
             ('bean_repulsion_multiplier', 'ひじき豆同士の反発 (通常の反発 × n)', 0, 5, 0.1, 1.0),
             ('throw_speed_multiplier', '投げ速度倍率', 0.1, 10, 0.1, 2.5),
             ('max_throw_multiplier', '投げ最大倍率', 1, 50, 1, 10),
-            ('image_tracking_interval', '画像追尾間隔 (秒)', 0, 2, 0.1, 1.0),
-            ('image_tracking_min_match_score', '追尾受理最低スコア', 0, 1, 0.01, 0.6),
             ('edge_bounce_count', '画面端バウンド回数', 0, 20, 1, EDGE_BOUNCE_COUNT_DEFAULT),
             ('edge_bounce_strength', 'バウンド強さ', 0, 1.5, 0.05, EDGE_BOUNCE_STRENGTH),
             ('nijiki_fps', '虹き豆 再生速度 (FPS)', 1, 60, 1, NIJIKI_DEFAULT_FPS),
@@ -3240,7 +2797,6 @@ class HijikimameApp:
                 'eye_movement_limit': EYE_MOVEMENT_LIMIT, 'tracking_speed': TRACKING_SPEED,
                 'mouse_repulsion_range': 0, 'bean_repulsion_multiplier': 1.0,
                 'throw_speed_multiplier': 2.5, 'max_throw_multiplier': 10,
-                'image_tracking_interval': 1.0, 'image_tracking_min_match_score': 0.6,
                 'edge_bounce_count': EDGE_BOUNCE_COUNT_DEFAULT,
                 'edge_bounce_strength': EDGE_BOUNCE_STRENGTH, 'nijiki_fps': NIJIKI_DEFAULT_FPS,
             }
@@ -3250,7 +2806,6 @@ class HijikimameApp:
             for key, value in (('mouse_repulsion_enabled', True),
                                ('bean_repulsion_enabled', True),
                                ('show_cosmetic_warning', True),
-                               ('image_tracking_force_fullscreen', False),
                                ('discord_presence_enabled', True)):
                 checkboxes[key].setChecked(value)
             boundary.setCurrentText('bounce')
@@ -3291,6 +2846,7 @@ class HijikimameApp:
             previous_settings = self.settings.copy()
             for k, v in settings_dict.items():
                 self.settings[k] = v
+            self._discard_legacy_tracking_settings()
             self.remaining_bounces = int(self.settings.get('edge_bounce_count', EDGE_BOUNCE_COUNT_DEFAULT))
 
             target_position = self.settings.get('target_position')
@@ -3298,11 +2854,6 @@ class HijikimameApp:
                 self.target_position = (int(target_position[0]), int(target_position[1]))
             else:
                 self.target_position = None
-
-            target_image_path = self.settings.get('target_image_path')
-            if target_image_path != previous_settings.get('target_image_path'):
-                self.target_image_path = target_image_path
-                self.target_image_template = self.load_image(target_image_path) if target_image_path else None
 
             selected_mode = int(self.settings.get('selected_mode', self.current_mode))
             visual_settings = ('custom_cosmetics', 'character_scale')
@@ -3317,7 +2868,7 @@ class HijikimameApp:
                 self._update_eye_positions()
             if hasattr(self, '_custom_cosmetic_listbox'):
                 self._refresh_custom_cosmetic_listbox()
-            if any(key in settings_dict for key in ('tracking_target_mode', 'target_position', 'target_image_path')):
+            if any(key in settings_dict for key in ('tracking_target_mode', 'target_position')):
                 self._update_target_status_labels()
         except:
             pass
@@ -3388,6 +2939,7 @@ class HijikimameApp:
                 raise Exception('invalid')
             for k, v in data.items():
                 self.settings[k] = v
+            self._discard_legacy_tracking_settings()
             if 'bean_repulsion_enabled' not in data:
                 self.settings['bean_repulsion_enabled'] = bool(
                     data.get('mouse_repulsion_enabled', True))
@@ -3407,14 +2959,10 @@ class HijikimameApp:
             self.settings.setdefault('selected_mode', 0)
             self.settings.setdefault('tracking_target_mode', 0)
             self.settings.setdefault('target_position', None)
-            self.settings.setdefault('target_image_path', None)
             self.settings.setdefault('custom_cosmetics', [])
-            self.settings.setdefault('image_tracking_force_fullscreen', False)
-            self.settings.setdefault('image_tracking_min_match_score', 0.6)
             self.settings.setdefault('character_scale', 100.0)
             self.settings.setdefault('eye_radius', 100.0)
             self.settings.setdefault('eye_movement_limit', EYE_MOVEMENT_LIMIT)
-            self.settings.setdefault('image_tracking_interval', 1.0)
             try:
                 if isinstance(self.settings.get('target_position'), list) and len(self.settings.get('target_position')) == 2:
                     try:
@@ -3425,20 +2973,6 @@ class HijikimameApp:
                     self.target_position = None
             except:
                 self.target_position = None
-            if self.settings.get('target_image_path'):
-                self.target_image_path = self.settings.get('target_image_path')
-                try:
-                    self.target_image_template = self.load_image(self.target_image_path)
-                except:
-                    self.target_image_template = None
-                if self.target_image_template is None:
-                    self.target_image_path = None
-                    self.settings['target_image_path'] = None
-                    if int(self.settings.get('tracking_target_mode', 0)) == 2:
-                        self.settings['tracking_target_mode'] = 0
-            else:
-                self.target_image_path = None
-                self.target_image_template = None
             try:
                 self.settings['eye_offset_x'] = int(self.settings.get('eye_offset_x', EYE_OFFSET_X))
             except:
@@ -3467,10 +3001,6 @@ class HijikimameApp:
                 self.settings['eye_movement_limit'] = float(self.settings.get('eye_movement_limit', EYE_MOVEMENT_LIMIT))
             except:
                 self.settings['eye_movement_limit'] = EYE_MOVEMENT_LIMIT
-            try:
-                self.settings['image_tracking_interval'] = float(self.settings.get('image_tracking_interval', 1.0))
-            except:
-                self.settings['image_tracking_interval'] = 1.0
             # persist
             try:
                 self.save_settings_file()
@@ -3487,10 +3017,6 @@ class HijikimameApp:
                         self.char_scale.set(self.settings.get('character_scale', 100.0))
                         self.eye_size_scale.set(self.settings.get('eye_radius', 100.0))
                         self.eye_movement_scale.set(self.settings.get('eye_movement_limit', EYE_MOVEMENT_LIMIT))
-                        self.image_tracking_scale.set(self.settings.get('image_tracking_interval', 1.0))
-                        self.image_tracking_score_scale.set(self.settings.get('image_tracking_min_match_score', 0.6))
-                        if hasattr(self, 'fullscreen_var'):
-                            self.fullscreen_var.set(1 if self.settings.get('image_tracking_force_fullscreen', False) else 0)
                         if hasattr(self, 'repulsion_var'):
                             self.repulsion_var.set(1 if self.settings.get('mouse_repulsion_enabled', True) else 0)
                         if hasattr(self, 'mouse_repulsion_range_scale'):
@@ -3584,7 +3110,7 @@ class HijikimameApp:
         except:
             pass
         target_mode = int(self.settings.get('tracking_target_mode', 0))
-        if target_mode in (1, 2) and self.target_position is not None:
+        if target_mode == 1 and self.target_position is not None:
             gaze_x, gaze_y = self.target_position
         else:
             gaze_x = self.master.winfo_pointerx()
@@ -3625,24 +3151,13 @@ class HijikimameApp:
         mouse_a_mag = math.hypot(mouse_ax, mouse_ay)
 
         target_mode = int(self.settings.get('tracking_target_mode', 0))
-        if target_mode == 2:
-            if self.target_image_template:
-                self._search_target_image_on_screen()
-            else:
-                target_mode = 0
-                self.settings['tracking_target_mode'] = 0
         if target_mode == 1 and self.target_position:
-            target_x, target_y = self.target_position
-        elif target_mode == 2 and self.target_position:
             target_x, target_y = self.target_position
         else:
             target_x, target_y = mouse_x, mouse_y
 
         char_center_x = self.x + self.image_width // 2 + self._get_center_offset()[0]
         char_center_y = self.y + self.image_height // 2 + self._get_center_offset()[1]
-        if target_mode == 2 and self._target_image_lost and self.target_position is not None:
-            target_x, target_y = char_center_x, char_center_y
-            self.vx = 0; self.vy = 0
         dx_char = target_x - char_center_x; dy_char = target_y - char_center_y
         distance = math.hypot(dx_char, dy_char)
         repulsion_enabled = bool(self.settings.get('mouse_repulsion_enabled', True)) and target_mode == 0
@@ -3790,7 +3305,10 @@ class HijikimameApp:
 
         self.master.geometry(f"+{int(self.x)}+{int(self.y)}"); self.update_eyes_only()
         if not self.is_exiting:
-            self.master.after(UPDATE_INTERVAL, self.update_position)
+            self.master.after(
+                self._bean_update_interval(len(peer_positions)),
+                self.update_position,
+            )
 
     def _current_bean_position(self):
         return {
@@ -3819,7 +3337,14 @@ class HijikimameApp:
         thread = threading.Thread(target=self._bean_position_sync_loop, daemon=True)
         thread.start()
 
+    def _bean_update_interval(self, peer_count):
+        return min(
+            BEAN_MAX_UPDATE_INTERVAL,
+            UPDATE_INTERVAL + max(0, peer_count - 3) * 5,
+        )
+
     def _bean_position_sync_loop(self):
+        sync_interval = BEAN_POSITION_SYNC_INTERVAL
         while not self._bean_sync_stop.is_set():
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -3845,9 +3370,10 @@ class HijikimameApp:
                 with self._bean_peer_positions_lock:
                     self._bean_peer_positions = peer_positions
                     self._bean_peer_positions_updated_at = time.monotonic()
+                sync_interval = self._bean_update_interval(len(peer_positions))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError):
                 pass
-            self._bean_sync_stop.wait(BEAN_POSITION_SYNC_INTERVAL / 1000)
+            self._bean_sync_stop.wait(sync_interval / 1000)
 
     def _apply_bean_repulsion(self, peer_positions):
         if not bool(self.settings.get('bean_repulsion_enabled', True)):
