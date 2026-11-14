@@ -506,28 +506,68 @@ import threading
 import hashlib
 import re
 import traceback
-try:
-    import requests
-except Exception:
+if '--additional-bean' not in sys.argv:
+    try:
+        import requests
+    except Exception:
+        requests = None
+    pypresence_import_error = None
+    try:
+        from pypresence import Presence
+    except Exception:
+        Presence = None
+        pypresence_import_error = traceback.format_exc()
+else:
     requests = None
-pypresence_import_error = None
-try:
-    from pypresence import Presence
-except Exception:
     Presence = None
-    pypresence_import_error = traceback.format_exc()
-try:
-    import pyautogui
-except Exception:
-    pyautogui = None
-try:
-    import cv2
-    import numpy as np
+    pypresence_import_error = None
+
+cv2 = None
+np = None
+CV2_AVAILABLE = False
+
+
+def _load_cv2():
+    global cv2, np, CV2_AVAILABLE
+    if CV2_AVAILABLE:
+        return True
+    try:
+        import cv2 as cv2_module
+        import numpy as np_module
+    except Exception:
+        return False
+    cv2 = cv2_module
+    np = np_module
     CV2_AVAILABLE = True
-except Exception:
-    cv2 = None
-    np = None
-    CV2_AVAILABLE = False
+    return True
+
+
+def _load_requests():
+    global requests
+    if requests is not None:
+        return True
+    try:
+        import requests as requests_module
+    except Exception:
+        return False
+    requests = requests_module
+    return True
+
+
+def _load_presence():
+    global Presence, pypresence_import_error
+    if Presence is not None:
+        return True
+    try:
+        from pypresence import Presence as presence_class
+    except Exception:
+        pypresence_import_error = traceback.format_exc()
+        return False
+    Presence = presence_class
+    pypresence_import_error = None
+    return True
+
+
 import shutil
 import tempfile
 import stat
@@ -628,7 +668,7 @@ DEFAULT_EYE_COLOR = 'black'
 INVERTED_EYE_COLOR = 'white'
 
 # アプリバージョン（リリースタグと一致させてください）
-VERSION = "v2.5.3"
+VERSION = "v2.5.4"
 
 DISCORD_CLIENT_ID = "1507453857456721951"
 DISCORD_ACTIVITY_STATE = "※これは完全な身内ネタアプリケーションです。"
@@ -931,12 +971,10 @@ class HijikimameApp:
         self.vy = 0
         
         self.is_exiting = False       
-        self.exit_frames = self.load_gif_frames(resource_path("exit_animation.gif")) 
+        self.exit_frames = None
         self.current_frame_index = 0  
         
         self.start_time = time.time() 
-        self.selective_mask = self._create_selective_mask(self.original_image) 
-        
         self.last_mouse_x = master.winfo_pointerx()
         self.last_mouse_y = master.winfo_pointery()
 
@@ -1174,7 +1212,7 @@ class HijikimameApp:
             pass
 
     def _download_latest_script(self):
-        if requests is None or not self._latest_update_script_url:
+        if not _load_requests() or not self._latest_update_script_url:
             return None
         try:
             resp = requests.get(self._latest_update_script_url, timeout=30)
@@ -1214,7 +1252,7 @@ class HijikimameApp:
 
     def _download_and_apply_update(self):
         try:
-            if requests is None:
+            if not _load_requests():
                 self.master.after(0, lambda: self._show_update_dialog("更新不可", "requests がインストールされていないため更新できません。"))
                 return
             token = os.environ.get('GITHUB_UPDATE_TOKEN') or os.environ.get('GITHUB_TOKEN')
@@ -1460,7 +1498,7 @@ class HijikimameApp:
     def _check_and_initiate_update(self):
         if VERSION.startswith('Snapshot'):
             return 'error', 'Snapshot 版では更新を確認できません。'
-        if requests is None:
+        if not _load_requests():
             return 'error', 'requests が利用できません。'
         owner = os.environ.get('GITHUB_OWNER', GITHUB_DEFAULT_OWNER)
         repo = os.environ.get('GITHUB_REPO', GITHUB_DEFAULT_REPO)
@@ -1532,7 +1570,7 @@ class HijikimameApp:
             self._disconnect_discord_presence()
             self._discord_presence_retry_scheduled = False
             return
-        if Presence is None:
+        if not _load_presence():
             error_text = 'pypresence module unavailable'
             if pypresence_import_error:
                 error_text += '\n' + pypresence_import_error
@@ -2297,7 +2335,7 @@ class HijikimameApp:
         """OpenCVベースの高速テンプレートマッチ。画面とテンプレートは PIL Image。
         戻り値: (center_x, center_y, score) または None
         """
-        if not CV2_AVAILABLE:
+        if not _load_cv2():
             return None
         try:
             # Crop to region if provided (region: (x,y,w,h))
@@ -2382,7 +2420,7 @@ class HijikimameApp:
             result = None
             try:
                 # Enforce OpenCV-only tracking for speed and accuracy.
-                if not CV2_AVAILABLE:
+                if not _load_cv2():
                     result = None
                     def _notify_no_cv():
                         try:
@@ -3912,6 +3950,8 @@ class HijikimameApp:
     def start_exit_animation(self):
         if self.is_exiting: return 
         self._bean_sync_stop.set()
+        if self.exit_frames is None:
+            self.exit_frames = self.load_gif_frames(resource_path("exit_animation.gif"))
         if not self.exit_frames:
             self.master.destroy(); return
         self.is_exiting = True
