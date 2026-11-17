@@ -51,7 +51,7 @@ jobs:
           body: |
             Release ${{ github.ref_name }}
 
-            + まだダウンロードしてほしくないかも:)
+            + ひじき豆の反発関係のバグを修正しました。
           draft: false
           prerelease: false
           files: |

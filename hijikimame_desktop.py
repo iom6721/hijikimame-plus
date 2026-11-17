@@ -3160,7 +3160,7 @@ class HijikimameApp:
         char_center_y = self.y + self.image_height // 2 + self._get_center_offset()[1]
         dx_char = target_x - char_center_x; dy_char = target_y - char_center_y
         distance = math.hypot(dx_char, dy_char)
-        repulsion_enabled = bool(self.settings.get('mouse_repulsion_enabled', True)) and target_mode == 0
+        repulsion_enabled = bool(self.settings.get('mouse_repulsion_enabled', True))
         touch_margin = max(16, min(self.image_width, self.image_height) // 6)
         touch_margin += max(0, min(100, int(self.settings.get('mouse_repulsion_range', 0))))
         is_mouse_over_char = (repulsion_enabled and
